@@ -9,6 +9,7 @@
     "worker": "node src/worker.js",
     "start:web": "npx prisma migrate deploy && node src/index.js",
     "postinstall": "prisma generate",
+    "vercel-build": "prisma generate && node scripts/migrate-production.js",
     "dev": "node --watch src/index.js",
     "dev:worker": "node --watch src/worker.js",
     "prisma:generate": "prisma generate",
