@@ -1,0 +1,140 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecipientStatus {
+  active
+  bounced
+  unsubscribed
+}
+
+enum CampaignStatus {
+  pending
+  sending
+  completed
+}
+
+enum CampaignRecipientStatus {
+  sent
+  bounced
+  opened
+  clicked
+}
+
+enum UserRole {
+  owner
+  member
+}
+
+model Workspace {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  users   User[]
+  invites Invite[]
+
+  gmailEmail        String?   @map("gmail_email")
+  gmailRefreshToken String?   @map("gmail_refresh_token")
+  gmailConnectedAt  DateTime? @map("gmail_connected_at")
+
+  @@map("workspaces")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  name         String
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(member)
+  workspaceId  String   @map("workspace_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns Campaign[]
+
+  @@map("users")
+}
+
+model Invite {
+  id          String    @id @default(uuid())
+  email       String
+  token       String    @unique
+  role        UserRole  @default(member)
+  workspaceId String    @map("workspace_id")
+  invitedById String    @map("invited_by_id")
+  expiresAt   DateTime  @map("expires_at")
+  acceptedAt  DateTime? @map("accepted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@map("invites")
+}
+
+model Recipient {
+  id                 String          @id @default(uuid())
+  email              String          @unique
+  name               String
+  status             RecipientStatus @default(active)
+  timezone           String          @default("UTC")
+  notes              String          @default("")
+  unsubscribeToken   String          @unique @default(uuid()) @map("unsubscribe_token")
+  createdAt          DateTime        @default(now()) @map("created_at")
+
+  campaignRecipients CampaignRecipient[]
+
+  @@map("recipients")
+}
+
+model Template {
+  id        String   @id @default(uuid())
+  name      String
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  campaigns Campaign[]
+
+  @@map("templates")
+}
+
+model Campaign {
+  id           String         @id @default(uuid())
+  name         String
+  subject      String
+  templateId   String         @map("template_id")
+  scheduledAt  DateTime       @map("scheduled_at")
+  status       CampaignStatus @default(pending)
+  recipientIds String[]       @default([]) @map("recipient_ids")
+  notes        String         @default("")
+  createdById  String?        @map("created_by_id")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  template           Template             @relation(fields: [templateId], references: [id])
+  createdBy          User?                @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  campaignRecipients CampaignRecipient[]
+
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id          String                   @id @default(uuid())
+  campaignId  String                   @map("campaign_id")
+  recipientId String                   @map("recipient_id")
+  status      CampaignRecipientStatus
+  sentAt      DateTime?                @map("sent_at")
+
+  campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  recipient Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, recipientId])
+  @@index([campaignId, status])
+  @@map("campaign_recipients")
+}

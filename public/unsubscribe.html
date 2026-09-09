@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1c4b96" />
+    <title>Unsubscribe · DeliverIQ</title>
+    <link rel="stylesheet" href="/css/app.css" />
+  </head>
+  <body style="overflow: auto">
+    <div class="auth-screen">
+      <div class="auth-card">
+        <h1>Unsubscribe</h1>
+        <p class="lede" id="lede">Checking your preference…</p>
+        <button class="btn btn-primary" id="confirm" type="button" hidden>Unsubscribe</button>
+      </div>
+    </div>
+    <script>
+      const token = new URLSearchParams(location.search).get('token') || '';
+      const lede = document.getElementById('lede');
+      const button = document.getElementById('confirm');
+
+      async function load() {
+        if (!token) {
+          lede.textContent = 'This unsubscribe link is missing a token.';
+          return;
+        }
+        const res = await fetch('/unsubscribe?token=' + encodeURIComponent(token));
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          lede.textContent = data.error || 'This link is invalid.';
+          return;
+        }
+        if (data.status === 'unsubscribed') {
+          lede.textContent = data.email + ' is already unsubscribed.';
+          return;
+        }
+        lede.textContent = 'Stop emails to ' + data.email + '?';
+        button.hidden = false;
+      }
+
+      button.addEventListener('click', async () => {
+        const res = await fetch('/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          lede.textContent = data.error || 'Could not unsubscribe.';
+          return;
+        }
+        button.hidden = true;
+        lede.textContent = data.email + ' has been unsubscribed. You will not receive future campaigns.';
+      });
+
+      load();
+    </script>
+  </body>
+</html>

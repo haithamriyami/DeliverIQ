@@ -1,0 +1,52 @@
+{
+  "name": "deliveriq",
+  "version": "1.0.0",
+  "description": "Smart global campaigns, clean lists, guaranteed delivery.",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "worker": "node src/worker.js",
+    "start:web": "npx prisma migrate deploy && node src/index.js",
+    "postinstall": "prisma generate",
+    "dev": "node --watch src/index.js",
+    "dev:worker": "node --watch src/worker.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:push": "prisma db push",
+    "db:seed": "node prisma/seed.js"
+  },
+  "keywords": [
+    "email",
+    "campaigns",
+    "sendgrid",
+    "bullmq"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.15.0",
+    "@sendgrid/mail": "^8.1.5",
+    "bcryptjs": "^3.0.3",
+    "bullmq": "^5.58.5",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "csv-parse": "^7.0.2",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "googleapis": "^178.0.0",
+    "ioredis": "^5.8.0",
+    "jsonwebtoken": "^9.0.3",
+    "luxon": "^3.7.1",
+    "multer": "^2.3.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "prisma": "^6.15.0"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  }
+}

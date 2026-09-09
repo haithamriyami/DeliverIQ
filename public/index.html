@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#1c4b96" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="DeliverIQ" />
+    <title>DeliverIQ</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/app.css" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  </head>
+  <body>
+    <div id="auth-screen" class="auth-screen">
+      <div class="auth-card">
+        <h1 id="auth-title">Log in</h1>
+        <p class="lede" id="auth-lede">Smart global campaigns, clean lists, guaranteed delivery.</p>
+        <form id="auth-form" class="form-grid" method="post" action="/auth/login" style="grid-template-columns: 1fr; padding: 0">
+          <input type="hidden" name="mode" value="login" />
+          <div class="field" id="auth-name-field" hidden>
+            <label for="auth-name">Your name</label>
+            <input id="auth-name" name="name" autocomplete="name" />
+          </div>
+          <div class="field" id="auth-workspace-field" hidden>
+            <label for="auth-workspace">Workspace name</label>
+            <input id="auth-workspace" name="workspaceName" value="DeliverIQ" />
+          </div>
+          <div class="field">
+            <label for="auth-email">Email</label>
+            <input id="auth-email" name="email" type="email" required autocomplete="username" />
+          </div>
+          <div class="field">
+            <label for="auth-password">Password</label>
+            <input id="auth-password" name="password" type="password" minlength="8" required autocomplete="current-password" />
+          </div>
+          <p class="auth-error" id="auth-error" hidden></p>
+          <div class="form-actions">
+            <button class="btn btn-primary" type="submit" id="auth-submit">Log in</button>
+          </div>
+        </form>
+        <p class="auth-switch" id="auth-switch"></p>
+      </div>
+    </div>
+
+    <div class="app locked" id="app">
+      <header class="topbar">
+        <div class="brand-wrap">
+          <button class="menu-btn" id="menu-btn" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <a class="brand" href="#dashboard" data-nav>
+            <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+              <rect x="1.4" y="1.4" width="29.2" height="29.2" rx="6" stroke="#fff" stroke-width="2.2" />
+              <rect x="7" y="17" width="4.2" height="8" rx="1" fill="#fff" />
+              <rect x="13.9" y="9" width="4.2" height="16" rx="1" fill="#fff" />
+              <rect x="20.8" y="12.5" width="4.2" height="12.5" rx="1" fill="#fff" />
+            </svg>
+            DeliverIQ
+          </a>
+        </div>
+        <nav class="top-nav">
+          <a href="#dashboard" data-nav data-top="dashboard">Dashboard</a>
+          <a href="#campaigns" data-nav data-top="campaigns">Campaigns</a>
+          <a href="#templates" data-nav data-top="templates">Templates</a>
+          <a href="#analytics" data-nav data-top="analytics">Analytics</a>
+        </nav>
+        <div class="user-meta">
+          <div class="hello" id="hello-name">Hello</div>
+          <button class="btn-logout" id="logout-btn" type="button">Log out</button>
+        </div>
+      </header>
+
+      <div class="shell">
+        <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+        <aside class="sidebar" id="sidebar">
+          <nav class="side-nav">
+            <a href="#dashboard" data-nav data-side="dashboard">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7" rx="1.2" />
+                <rect x="14" y="3" width="7" height="7" rx="1.2" />
+                <rect x="3" y="14" width="7" height="7" rx="1.2" />
+                <rect x="14" y="14" width="7" height="7" rx="1.2" />
+              </svg>
+              Dashboard
+            </a>
+            <a href="#campaigns" data-nav data-side="campaigns">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+                <path d="M4 12v7a1 1 0 0 0 1 1h3" />
+                <path d="M20 8v11" />
+                <path d="M4 12c6-7 10-7 16-4" />
+                <circle cx="20" cy="7" r="2" />
+              </svg>
+              All Campaigns
+            </a>
+            <a href="#recipients" data-nav data-side="recipients">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+                <circle cx="9" cy="8" r="3" />
+                <path d="M3.5 19c.6-3 2.7-5 5.5-5s4.9 2 5.5 5" />
+                <circle cx="17" cy="9" r="2.4" />
+                <path d="M16 19c.4-2 1.7-3.4 3.6-3.8" />
+              </svg>
+              Recipients
+            </a>
+            <a href="#reports" data-nav data-side="reports">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+                <path d="M4 19V9" />
+                <path d="M10 19V5" />
+                <path d="M16 19v-7" />
+                <path d="M22 19H2" />
+              </svg>
+              Reports
+            </a>
+            <a href="#settings" data-nav data-side="settings">
+              <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H8a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V8c.3.7.9 1.2 1.6 1.4H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1.1Z" />
+              </svg>
+              Settings
+            </a>
+          </nav>
+          <button class="btn-new" type="button" data-page="new-campaign">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New Campaign
+          </button>
+        </aside>
+
+        <main class="main">
+          <section id="page-dashboard" class="page active">
+            <div class="kpis">
+              <article class="card kpi">
+                <div class="kpi-label">Total Campaigns</div>
+                <div class="kpi-value" id="kpi-campaigns">0</div>
+                <a class="kpi-link" href="#campaigns" data-nav>View All →</a>
+              </article>
+              <article class="card kpi">
+                <div class="kpi-label">Emails Sent</div>
+                <div class="kpi-value" id="kpi-sent">0</div>
+              </article>
+              <article class="card kpi">
+                <div class="kpi-label">Open Rate</div>
+                <div class="kpi-value" id="kpi-open">0%</div>
+                <div class="kpi-note good" id="kpi-open-note">No sends yet</div>
+              </article>
+              <article class="card kpi">
+                <div class="kpi-label">Bounce Rate</div>
+                <div class="kpi-value" id="kpi-bounce">0%</div>
+                <div class="kpi-note" id="kpi-bounce-note">Healthy</div>
+              </article>
+            </div>
+
+            <div class="mid">
+              <article class="card">
+                <div class="card-head">
+                  <h2>Recent Campaigns</h2>
+                  <a class="kpi-link" href="#campaigns" data-nav>View All →</a>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Campaign Name</th>
+                        <th>Status</th>
+                        <th>Sent</th>
+                        <th>Opens</th>
+                        <th>Clicks</th>
+                        <th>Date</th>
+                      </tr>
+                    </thead>
+                    <tbody id="recent-campaigns-body">
+                      <tr><td colspan="6" class="empty">No campaigns yet</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+              <article class="card">
+                <div class="card-head"><h2>Upcoming Schedule</h2></div>
+                <div class="schedule" id="upcoming-schedule">
+                  <div class="empty">Nothing scheduled</div>
+                </div>
+              </article>
+            </div>
+
+            <div class="bottom">
+              <article class="card chart-card">
+                <div class="card-head"><h2>Performance Overview</h2></div>
+                <div class="chart-wrap"><canvas id="performanceChart"></canvas></div>
+                <div class="legend">
+                  <span><i class="swatch" style="background:#2f6fed"></i>Opens</span>
+                  <span><i class="swatch" style="background:#9ec2ff"></i>Clicks</span>
+                </div>
+              </article>
+              <article class="card chart-card">
+                <div class="card-head"><h2>Bounce &amp; Unsubscribes</h2></div>
+                <div class="donuts">
+                  <div class="donut">
+                    <p class="bounce" id="bounce-label">0 Bounces</p>
+                    <canvas id="bounceChart"></canvas>
+                  </div>
+                  <div class="donut">
+                    <p class="unsub" id="unsub-label">0 Unsubscribes</p>
+                    <canvas id="unsubChart"></canvas>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section id="page-campaigns" class="page">
+            <div class="page-head">
+              <h1>All Campaigns</h1>
+              <button class="btn btn-primary" type="button" data-page="new-campaign">New Campaign</button>
+            </div>
+            <article class="card">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Campaign Name</th>
+                      <th>Status</th>
+                      <th>Sent</th>
+                      <th>Opens</th>
+                      <th>Clicks</th>
+                      <th>Date</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="campaigns-body"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+
+          <section id="page-templates" class="page">
+            <div class="page-head"><h1>Templates</h1></div>
+            <article class="card" style="margin-bottom: 16px">
+              <form id="template-form" class="form-grid">
+                <div class="field">
+                  <label for="t-name">Template name</label>
+                  <input id="t-name" name="name" required placeholder="Welcome" />
+                </div>
+                <div class="field full">
+                  <label for="t-body">HTML body</label>
+                  <textarea id="t-body" name="body" rows="4" required placeholder="<p>Hi {{name}}</p>"></textarea>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Save template</button>
+                </div>
+              </form>
+            </article>
+            <div class="template-grid" id="template-grid"></div>
+          </section>
+
+          <section id="page-analytics" class="page">
+            <div class="page-head"><h1>Analytics</h1></div>
+            <div class="bottom">
+              <article class="card chart-card">
+                <div class="card-head"><h2>Opens vs Clicks</h2></div>
+                <div class="chart-wrap"><canvas id="analyticsChart"></canvas></div>
+              </article>
+              <article class="card kpi">
+                <div class="kpi-label">Delivery quality</div>
+                <div class="kpi-value" id="analytics-quality">—</div>
+                <div class="kpi-note" id="analytics-quality-note">Based on bounce rate</div>
+              </article>
+            </div>
+          </section>
+
+          <section id="page-recipients" class="page">
+            <div class="page-head"><h1>Recipients</h1></div>
+            <article class="card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>Import CSV or add a contact</h2></div>
+              <form id="csv-form" class="form-grid">
+                <div class="field full">
+                  <label>CSV file (email, name, timezone, notes)</label>
+                  <div class="dropzone">
+                    <input id="csv-file" type="file" accept=".csv,text/csv" />
+                    <p class="muted" style="margin-top:8px">
+                      Or paste CSV below. <a href="/sample-recipients.csv" download>Download sample</a>
+                    </p>
+                  </div>
+                </div>
+                <div class="field full">
+                  <label for="csv-text">Paste CSV</label>
+                  <textarea id="csv-text" name="csv" rows="4" placeholder="email,name,timezone,notes"></textarea>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Import</button>
+                </div>
+              </form>
+              <form id="recipient-form" class="form-grid">
+                <div class="field">
+                  <label for="r-name">Name</label>
+                  <input id="r-name" name="name" required />
+                </div>
+                <div class="field">
+                  <label for="r-email">Email</label>
+                  <input id="r-email" name="email" type="email" required />
+                </div>
+                <div class="field">
+                  <label for="r-tz">Timezone</label>
+                  <input id="r-tz" name="timezone" placeholder="America/New_York" />
+                </div>
+                <div class="field">
+                  <label for="r-notes">Notes</label>
+                  <input id="r-notes" name="notes" placeholder="Met at launch event" />
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Add recipient</button>
+                </div>
+              </form>
+            </article>
+            <article class="card">
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Timezone</th>
+                      <th>Notes</th>
+                      <th>Status</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="recipients-body"></tbody>
+                </table>
+              </div>
+            </article>
+          </section>
+
+          <section id="page-reports" class="page">
+            <div class="page-head"><h1>Reports</h1></div>
+            <div class="kpis" id="reports-grid"></div>
+          </section>
+
+          <section id="page-settings" class="page">
+            <div class="page-head"><h1>Settings</h1></div>
+            <article class="card settings-card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>Sending</h2></div>
+              <div class="team-list">
+                <p class="muted" id="gmail-status">Checking Gmail…</p>
+                <div id="gmail-actions" style="margin: 10px 0 16px"></div>
+                <p class="muted" id="sendgrid-status">Checking SendGrid…</p>
+                <p class="muted">No domain needed. Connect Gmail to send as your Google address (free, ~500/day). SendGrid is optional later.</p>
+              </div>
+            </article>
+            <article class="card settings-card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>Password</h2></div>
+              <form id="password-form" class="form-grid">
+                <div class="field">
+                  <label for="pw-current">Current password</label>
+                  <input id="pw-current" name="currentPassword" type="password" required minlength="1" autocomplete="current-password" />
+                </div>
+                <div class="field">
+                  <label for="pw-new">New password</label>
+                  <input id="pw-new" name="newPassword" type="password" required minlength="8" autocomplete="new-password" />
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Update password</button>
+                </div>
+              </form>
+            </article>
+            <article class="card settings-card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>Team</h2></div>
+              <div class="team-list" id="team-list"></div>
+              <form id="invite-form" class="form-grid" style="display:none">
+                <div class="field full">
+                  <label for="invite-email">Invite partner email</label>
+                  <input id="invite-email" name="email" type="email" required placeholder="partner@example.com" />
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Create invite link</button>
+                </div>
+              </form>
+              <div id="invite-result" class="team-list"></div>
+            </article>
+          </section>
+
+          <section id="page-new-campaign" class="page">
+            <div class="page-head"><h1>New Campaign</h1></div>
+            <article class="card">
+              <form class="form-grid" id="campaign-form">
+                <div class="field">
+                  <label for="c-name">Campaign name</label>
+                  <input id="c-name" name="name" required placeholder="Spring Sale Email" />
+                </div>
+                <div class="field">
+                  <label for="c-subject">Subject</label>
+                  <input id="c-subject" name="subject" required placeholder="Hello {{name}}" />
+                </div>
+                <div class="field">
+                  <label for="c-template">Template</label>
+                  <select id="c-template" name="templateId" required></select>
+                </div>
+                <div class="field">
+                  <label for="c-when">Scheduled at</label>
+                  <input id="c-when" name="scheduledAt" type="datetime-local" required />
+                </div>
+                <div class="field full">
+                  <label>Recipients</label>
+                  <div class="check-list" id="c-recipients"></div>
+                </div>
+                <div class="field full">
+                  <label for="c-notes">Internal notes</label>
+                  <textarea id="c-notes" name="notes" rows="2" placeholder="Why this send exists"></textarea>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-ghost" type="button" data-page="dashboard">Cancel</button>
+                  <button class="btn btn-primary" type="submit">Create campaign</button>
+                </div>
+              </form>
+            </article>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="/js/app.js"></script>
+  </body>
+</html>
