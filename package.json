@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.15.0",
+    "prisma": "^6.15.0",
     "@sendgrid/mail": "^8.1.5",
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.58.5",
@@ -42,9 +43,6 @@
     "luxon": "^3.7.1",
     "multer": "^2.3.0",
     "zod": "^3.25.76"
-  },
-  "devDependencies": {
-    "prisma": "^6.15.0"
   },
   "prisma": {
     "seed": "node prisma/seed.js"

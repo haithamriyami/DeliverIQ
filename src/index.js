@@ -3,9 +3,11 @@ import { env } from './config/env.js';
 import { prisma } from './lib/prisma.js';
 import { campaignQueue } from './queues/campaignQueue.js';
 import { createCampaignWorker } from './queues/workers/campaignWorker.js';
-import { createApp } from './app.js';
+import app from './app.js';
 
-if (env.nodeEnv === 'production') {
+const isVercel = Boolean(process.env.VERCEL);
+
+if (env.nodeEnv === 'production' && !isVercel) {
   try {
     execSync('npx prisma migrate deploy', { stdio: 'inherit' });
   } catch (err) {
@@ -13,24 +15,24 @@ if (env.nodeEnv === 'production') {
   }
 }
 
-const app = createApp();
-
-if (process.env.REDIS_URL || env.nodeEnv !== 'production') {
+if (!isVercel && (process.env.REDIS_URL || env.nodeEnv !== 'production')) {
   createCampaignWorker();
 }
 
-const server = app.listen(env.port, () => {
-  console.log(`DeliverIQ API listening on http://localhost:${env.port}`);
-  console.log('Smart global campaigns, clean lists, guaranteed delivery.');
-});
+if (!isVercel) {
+  const server = app.listen(env.port, () => {
+    console.log(`DeliverIQ API listening on http://localhost:${env.port}`);
+    console.log('Smart global campaigns, clean lists, guaranteed delivery.');
+  });
 
-async function shutdown() {
-  console.log('Shutting down API...');
-  server.close();
-  await campaignQueue.close();
-  await prisma.$disconnect();
-  process.exit(0);
+  async function shutdown() {
+    console.log('Shutting down API...');
+    server.close();
+    await campaignQueue.close();
+    await prisma.$disconnect();
+    process.exit(0);
+  }
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
-
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
