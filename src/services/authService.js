@@ -12,12 +12,34 @@ export async function setupStatus() {
 }
 
 export async function registerOwner({ name, email, password, workspaceName }) {
-  const existing = await prisma.user.count();
-  if (existing > 0) {
-    throw new HttpError(409, 'Workspace already exists. Ask the owner for an invite.');
+  const emailNormalized = email.toLowerCase();
+  const already = await prisma.user.findUnique({ where: { email: emailNormalized } });
+  if (already) {
+    throw new HttpError(409, 'That email already has an account. Log in instead.');
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  const existingCount = await prisma.user.count();
+
+  if (existingCount > 0) {
+    const workspace = await prisma.workspace.findFirst({
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!workspace) {
+      throw new HttpError(500, 'Workspace is missing. Try again.');
+    }
+
+    return prisma.user.create({
+      data: {
+        name,
+        email: emailNormalized,
+        passwordHash,
+        role: 'member',
+        workspaceId: workspace.id,
+      },
+      include: { workspace: true },
+    });
+  }
 
   return prisma.$transaction(async (tx) => {
     const workspace = await tx.workspace.create({
@@ -27,7 +49,7 @@ export async function registerOwner({ name, email, password, workspaceName }) {
     return tx.user.create({
       data: {
         name,
-        email: email.toLowerCase(),
+        email: emailNormalized,
         passwordHash,
         role: 'owner',
         workspaceId: workspace.id,

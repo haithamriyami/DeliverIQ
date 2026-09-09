@@ -12,6 +12,7 @@ const pageMap = {
 const charts = {};
 let currentUser = null;
 let inviteToken = null;
+let setupRequired = true;
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -122,16 +123,21 @@ function currentPage() {
 function setAuthMode(mode, { email = '', workspace = '' } = {}) {
   const form = document.getElementById('auth-form');
   form.mode.value = mode;
+  const showWorkspace = mode === 'register' && setupRequired;
   document.getElementById('auth-name-field').hidden = mode === 'login';
-  document.getElementById('auth-workspace-field').hidden = mode !== 'register';
+  document.getElementById('auth-workspace-field').hidden = !showWorkspace;
   document.getElementById('auth-name').required = mode !== 'login';
-  document.getElementById('auth-email').value = email;
+  if (email) {
+    document.getElementById('auth-email').value = email;
+  }
   if (workspace) {
     document.getElementById('auth-workspace').value = workspace;
   }
   const titles = {
     login: ['Log in', 'Welcome back to DeliverIQ.', 'Log in'],
-    register: ['Create workspace', 'You’re first — this account becomes the owner.', 'Create workspace'],
+    register: setupRequired
+      ? ['Create account', 'You’re first — this account becomes the owner.', 'Create account']
+      : ['Create account', 'Join the workspace to send and track campaigns.', 'Create account'],
     invite: ['Join workspace', 'Create your password to join the team.', 'Join team'],
   };
   const [title, lede, submit] = titles[mode];
@@ -140,12 +146,20 @@ function setAuthMode(mode, { email = '', workspace = '' } = {}) {
   document.getElementById('auth-submit').textContent = submit;
   const switchEl = document.getElementById('auth-switch');
   if (mode === 'login') {
-    switchEl.innerHTML = '';
+    switchEl.innerHTML = `No account? <button type="button" id="auth-to-register">Create account</button>`;
   } else if (mode === 'register') {
-    switchEl.innerHTML = '';
+    switchEl.innerHTML = `Already have an account? <button type="button" id="auth-to-login">Log in</button>`;
   } else {
     switchEl.innerHTML = '';
   }
+  document.getElementById('auth-to-register')?.addEventListener('click', () => {
+    showAuthError('');
+    setAuthMode('register');
+  });
+  document.getElementById('auth-to-login')?.addEventListener('click', () => {
+    showAuthError('');
+    setAuthMode('login');
+  });
 }
 
 function unlockApp(user) {
@@ -526,7 +540,7 @@ document.getElementById('auth-form').addEventListener('submit', async (event) =>
         }),
       });
       unlockApp(data.user);
-      showToast('Workspace created');
+      showToast(setupRequired ? 'Workspace created' : 'Account created');
       return;
     }
     if (mode === 'invite') {
@@ -717,7 +731,8 @@ async function boot() {
     unlockApp(me.user);
   } catch {
     const status = await api('/auth/status');
-    setAuthMode(status.setupRequired ? 'register' : 'login');
+    setupRequired = Boolean(status.setupRequired);
+    setAuthMode(setupRequired ? 'register' : 'login');
     lockApp();
   }
 }
