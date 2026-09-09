@@ -102,6 +102,8 @@ export async function gmailStatus(workspaceId) {
     email: workspace?.gmailEmail || null,
     connectedAt: workspace?.gmailConnectedAt || null,
     redirectUri: env.google.redirectUri,
+    origin: env.appUrl,
+    localRedirectUri: 'http://127.0.0.1:3000/auth/google/callback',
   };
 }
 

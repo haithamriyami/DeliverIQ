@@ -375,6 +375,27 @@ async function loadTemplates() {
   select.innerHTML = templates.map((t) => `<option value="${t.id}">${t.name}</option>`).join('');
 }
 
+function googleRedirectHelp(google) {
+  const production = google.redirectUri || '';
+  const local = google.localRedirectUri || 'http://127.0.0.1:3000/auth/google/callback';
+  const origin = google.origin || '';
+  return `<div class="google-setup">
+      <p class="muted">Before Connect Gmail, add these in Google Cloud → APIs &amp; Services → Credentials → your <strong>Web application</strong> OAuth client. Google must match the URI exactly or everyone gets <code>redirect_uri_mismatch</code>.</p>
+      <p class="muted"><strong>Authorized JavaScript origins</strong></p>
+      <div class="copy-row"><code>${origin}</code></div>
+      <div class="copy-row"><code>http://127.0.0.1:3000</code></div>
+      <p class="muted"><strong>Authorized redirect URIs</strong></p>
+      <div class="copy-row">
+        <code id="google-redirect-uri">${production}</code>
+        <button type="button" class="btn btn-ghost btn-small" id="copy-redirect-uri" data-copy="${production}">Copy</button>
+      </div>
+      <div class="copy-row">
+        <code>${local}</code>
+        <button type="button" class="btn btn-ghost btn-small" data-copy="${local}">Copy</button>
+      </div>
+    </div>`;
+}
+
 async function loadSettings() {
   const [me, team] = await Promise.all([api('/auth/me'), api('/auth/team')]);
   const sg = me.sendgrid;
@@ -393,13 +414,14 @@ async function loadSettings() {
         : '';
   } else if (google.configured) {
     gmailEl.innerHTML = '<span class="sendgrid-pill dry">Gmail ready — connect your Google account</span>';
-    actions.innerHTML =
+    const connectBtn =
       me.user.role === 'owner'
         ? '<a class="btn btn-primary" href="/auth/google">Connect Gmail</a>'
         : '<p class="muted">Ask the owner to connect Gmail in Settings.</p>';
+    actions.innerHTML = `${connectBtn}${googleRedirectHelp(google)}`;
   } else {
     gmailEl.innerHTML = '<span class="sendgrid-pill dry">Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env</span>';
-    actions.innerHTML = `<p class="muted">Redirect URI to paste in Google Cloud: <code>${google.redirectUri || ''}</code></p>`;
+    actions.innerHTML = googleRedirectHelp(google);
   }
 
   const tracking = me.tracking || {};
@@ -666,6 +688,17 @@ document.getElementById('csv-form').addEventListener('submit', async (event) => 
 });
 
 document.addEventListener('click', async (event) => {
+  const copyBtn = event.target.closest('[data-copy]');
+  if (copyBtn) {
+    const value = copyBtn.getAttribute('data-copy') || '';
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast('Copied');
+    } catch {
+      showToast('Copy this URI: ' + value);
+    }
+    return;
+  }
   if (event.target.id !== 'gmail-disconnect') return;
   try {
     await api('/auth/google/disconnect', { method: 'POST' });

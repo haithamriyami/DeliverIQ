@@ -30,10 +30,16 @@ function required(name, fallback = undefined) {
   return value;
 }
 
+function trimSlash(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+const appUrl = trimSlash(process.env.APP_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`);
+
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: Number(process.env.PORT ?? 3000),
-  appUrl: process.env.APP_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`,
+  appUrl,
   sessionSecret: process.env.SESSION_SECRET ?? 'deliveriq-dev-session-secret-change-me',
   databaseUrl: required('DATABASE_URL', 'postgresql://deliveriq:deliveriq@127.0.0.1:5433/deliveriq?schema=public'),
   redis: redisConfig(),
@@ -47,8 +53,6 @@ export const env = {
   google: {
     clientId: process.env.GOOGLE_CLIENT_ID ?? '',
     clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? '',
-    redirectUri:
-      process.env.GOOGLE_REDIRECT_URI ??
-      `${process.env.APP_URL ?? 'http://127.0.0.1:3000'}/auth/google/callback`,
+    redirectUri: `${appUrl}/auth/google/callback`,
   },
 };

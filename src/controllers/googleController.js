@@ -13,10 +13,27 @@ function signGoogleState(user) {
   );
 }
 
+function requestHost(req) {
+  return String(req.get('host') || '').split(':')[0];
+}
+
+function appHost() {
+  try {
+    return new URL(env.appUrl).hostname;
+  } catch {
+    return '';
+  }
+}
+
 export const start = [
   requireAuth,
   requireOwner,
   asyncHandler(async (req, res) => {
+    const expected = appHost();
+    const actual = requestHost(req);
+    if (expected && actual && expected !== actual && expected !== '127.0.0.1' && expected !== 'localhost') {
+      return res.redirect(`${env.appUrl}/auth/google`);
+    }
     res.redirect(gmailService.gmailAuthUrl(signGoogleState(req.user)));
   }),
 ];
