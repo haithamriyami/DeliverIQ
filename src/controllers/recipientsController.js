@@ -23,8 +23,12 @@ export const create = [
   }),
 ];
 
-export const list = asyncHandler(async (_req, res) => {
-  const recipients = await recipientService.listRecipients();
+export const list = asyncHandler(async (req, res) => {
+  const status = req.query.status;
+  const allowed = ['active', 'bounced', 'unsubscribed'];
+  const recipients = await recipientService.listRecipients(
+    allowed.includes(status) ? status : undefined
+  );
   res.json(recipients);
 });
 
@@ -41,6 +45,11 @@ export const remove = [
     res.json({ ok: true });
   }),
 ];
+
+export const removeBounced = asyncHandler(async (_req, res) => {
+  const result = await recipientService.deleteBouncedRecipients();
+  res.json(result);
+});
 
 export const importCsv = asyncHandler(async (req, res) => {
   let csvText = '';

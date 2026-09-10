@@ -47,6 +47,7 @@ export const send = [
       status: result.campaign.status,
       enqueued: result.enqueued,
       failed: result.failed,
+      remaining: result.remaining,
       skipped: result.skipped,
       errors: result.errors,
     });
@@ -79,6 +80,29 @@ export const testSend = [
     res.json(result);
   }),
 ];
+
+export const bounces = [
+  validate(campaignIdSchema),
+  asyncHandler(async (req, res) => {
+    const rows = await campaignService.listCampaignBounces(req.validated.params.id);
+    res.json(rows);
+  }),
+];
+
+export const syncBounces = asyncHandler(async (_req, res) => {
+  try {
+    const result = await campaignService.syncBouncesFromGmail();
+    res.json(result);
+  } catch (err) {
+    if (err.status === 403) {
+      return res.status(403).json({
+        error: err.message,
+        needsReconnect: true,
+      });
+    }
+    throw err;
+  }
+});
 
 export const remove = [
   validate(campaignIdSchema),

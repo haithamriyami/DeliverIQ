@@ -3,6 +3,14 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { campaignQueue, sendJobId } from '../queues/campaignQueue.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
 import { env } from '../config/env.js';
+import { listGmailBounceAddresses } from './gmailService.js';
+
+const SEND_BATCH_SIZE = 8;
+const SEND_GAP_MS = 1500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export async function createCampaign({
   name,
@@ -102,14 +110,11 @@ export async function enqueueCampaign(campaignId) {
     where: { id: { in: campaign.recipientIds } },
   });
 
-  const alreadySent = await prisma.campaignRecipient.findMany({
-    where: {
-      campaignId,
-      status: { in: ['sent', 'opened', 'clicked'] },
-    },
+  const alreadyProcessed = await prisma.campaignRecipient.findMany({
+    where: { campaignId },
     select: { recipientId: true },
   });
-  const alreadySentIds = new Set(alreadySent.map((row) => row.recipientId));
+  const alreadyProcessedIds = new Set(alreadyProcessed.map((row) => row.recipientId));
 
   const skipped = {
     alreadySent: 0,
@@ -120,7 +125,7 @@ export async function enqueueCampaign(campaignId) {
   const toSend = [];
 
   for (const recipient of recipients) {
-    if (alreadySentIds.has(recipient.id)) {
+    if (alreadyProcessedIds.has(recipient.id)) {
       skipped.alreadySent += 1;
       continue;
     }
@@ -139,6 +144,7 @@ export async function enqueueCampaign(campaignId) {
       campaign: completed || campaign,
       enqueued: 0,
       failed: 0,
+      remaining: 0,
       skipped,
       errors: [],
     };
@@ -149,11 +155,15 @@ export async function enqueueCampaign(campaignId) {
     data: { status: 'sending' },
   });
 
+  const batch = toSend.slice(0, SEND_BATCH_SIZE);
   let enqueued = 0;
   let failed = 0;
   const errors = [];
 
-  for (const recipient of toSend) {
+  for (const [index, recipient] of batch.entries()) {
+    if (index > 0) {
+      await sleep(SEND_GAP_MS);
+    }
     try {
       await sendCampaignEmail({
         to: recipient.email,
@@ -170,16 +180,23 @@ export async function enqueueCampaign(campaignId) {
       failed += 1;
       errors.push({ email: recipient.email, error: err.message });
       console.error(`[send] ${recipient.email}`, err.message);
+      await recordBounce({
+        campaignId: campaign.id,
+        recipientId: recipient.id,
+        error: err.message,
+      });
     }
   }
 
   await maybeCompleteCampaign(campaignId);
   const updated = await getCampaignById(campaignId);
+  const remaining = Math.max(0, toSend.length - batch.length);
 
   return {
     campaign: updated,
     enqueued,
     failed,
+    remaining,
     skipped,
     errors,
   };
@@ -233,7 +250,7 @@ export async function getCampaignReport(campaignId) {
   }
 
   const delivered = counts.sent + counts.opened + counts.clicked;
-  const totalTouched = delivered + counts.bounced;
+  const funnel = funnelFromCounts(counts, campaign.recipientIds.length);
   const opened = counts.opened + counts.clicked;
 
   return {
@@ -248,11 +265,12 @@ export async function getCampaignReport(campaignId) {
       bounced: counts.bounced,
       opened,
       clicked: counts.clicked,
+      pending: funnel.pending,
     },
     rates: {
-      bounceRate: totalTouched ? counts.bounced / totalTouched : 0,
-      openRate: delivered ? opened / delivered : 0,
-      clickRate: delivered ? counts.clicked / delivered : 0,
+      bounceRate: funnel.bounceRate,
+      openRate: funnel.openRate,
+      clickRate: funnel.clickRate,
     },
   };
 }
@@ -292,6 +310,92 @@ export async function recordSend({ campaignId, recipientId }) {
       status: keepStatus,
     },
   });
+}
+
+export async function recordBounce({ campaignId, recipientId, error }) {
+  const reason = String(error || 'Bounced').slice(0, 500);
+
+  await prisma.recipient.update({
+    where: { id: recipientId },
+    data: { status: 'bounced', lastError: reason },
+  });
+
+  const existing = await prisma.campaignRecipient.findUnique({
+    where: {
+      campaignId_recipientId: { campaignId, recipientId },
+    },
+  });
+
+  if (!existing) {
+    return prisma.campaignRecipient.create({
+      data: {
+        campaignId,
+        recipientId,
+        status: 'bounced',
+        error: reason,
+        sentAt: new Date(),
+      },
+    });
+  }
+
+  return prisma.campaignRecipient.update({
+    where: { id: existing.id },
+    data: {
+      status: 'bounced',
+      error: reason,
+    },
+  });
+}
+
+export async function listCampaignBounces(campaignId) {
+  await getCampaignById(campaignId);
+  return prisma.campaignRecipient.findMany({
+    where: { campaignId, status: 'bounced' },
+    include: {
+      recipient: {
+        select: { id: true, email: true, name: true, status: true, lastError: true },
+      },
+    },
+    orderBy: { sentAt: 'desc' },
+  });
+}
+
+export async function syncBouncesFromGmail() {
+  const addresses = await listGmailBounceAddresses();
+  if (addresses.length === 0) {
+    return { scanned: 0, marked: 0, emails: [] };
+  }
+
+  const recipients = await prisma.recipient.findMany({
+    where: { email: { in: addresses } },
+  });
+
+  const emails = [];
+  for (const recipient of recipients) {
+    await prisma.recipient.update({
+      where: { id: recipient.id },
+      data: {
+        status: 'bounced',
+        lastError: recipient.lastError || 'Gmail reported this address as undeliverable.',
+      },
+    });
+
+    const rows = await prisma.campaignRecipient.findMany({
+      where: { recipientId: recipient.id },
+    });
+
+    for (const row of rows) {
+      await recordBounce({
+        campaignId: row.campaignId,
+        recipientId: recipient.id,
+        error: row.error || 'Gmail reported this address as undeliverable.',
+      });
+    }
+
+    emails.push(recipient.email);
+  }
+
+  return { scanned: addresses.length, marked: emails.length, emails };
 }
 
 export async function applyEngagementEvent({ campaignId, recipientId, event }) {
@@ -338,16 +442,19 @@ function emptyCounts() {
   return { sent: 0, bounced: 0, opened: 0, clicked: 0 };
 }
 
-function funnelFromCounts(counts) {
+function funnelFromCounts(counts, audienceSize = 0) {
   const delivered = counts.sent + counts.opened + counts.clicked;
-  const totalTouched = delivered + counts.bounced;
+  const attempted = delivered + counts.bounced;
   const opened = counts.opened + counts.clicked;
+  const pending = Math.max(0, audienceSize - attempted);
   return {
     sent: delivered,
     bounced: counts.bounced,
     opened,
     clicked: counts.clicked,
-    bounceRate: totalTouched ? counts.bounced / totalTouched : 0,
+    pending,
+    attempted,
+    bounceRate: attempted ? counts.bounced / attempted : 0,
     openRate: delivered ? opened / delivered : 0,
     clickRate: delivered ? counts.clicked / delivered : 0,
   };
@@ -369,7 +476,10 @@ export async function listCampaignsWithStats() {
   }
 
   return campaigns.map((campaign) => {
-    const totals = funnelFromCounts(byCampaign.get(campaign.id) || emptyCounts());
+    const totals = funnelFromCounts(
+      byCampaign.get(campaign.id) || emptyCounts(),
+      campaign.recipientIds.length
+    );
     return {
       ...campaign,
       totals: {
@@ -377,6 +487,7 @@ export async function listCampaignsWithStats() {
         bounced: totals.bounced,
         opened: totals.opened,
         clicked: totals.clicked,
+        pending: totals.pending,
       },
       rates: {
         bounceRate: totals.bounceRate,
@@ -426,6 +537,8 @@ export async function getDashboard() {
       emailsSent: funnel.sent,
       openRate: funnel.openRate,
       bounceRate: funnel.bounceRate,
+      bounced: funnel.bounced,
+      pending: campaigns.reduce((sum, c) => sum + (c.totals?.pending || 0), 0),
     },
     recent: campaigns.slice(0, 8),
     upcoming,

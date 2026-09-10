@@ -11,6 +11,7 @@ const router = Router();
 
 router.post('/', ...recipientsController.create);
 router.get('/', recipientsController.list);
+router.delete('/bounced', recipientsController.removeBounced);
 router.delete('/:id', ...recipientsController.remove);
 router.post('/import', upload.single('file'), recipientsController.importCsv);
 

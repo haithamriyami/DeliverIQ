@@ -13,6 +13,8 @@ const charts = {};
 let currentUser = null;
 let inviteToken = null;
 let setupRequired = true;
+let recipientFilter = '';
+let sendingCampaignId = null;
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -44,6 +46,14 @@ function fmtDate(value) {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function fmtNum(n) {
@@ -179,18 +189,21 @@ function lockApp() {
 
 function campaignRow(campaign, { actions = false } = {}) {
   const totals = campaign.totals || {};
-  const empty = campaign.status === 'pending';
+  const empty = campaign.status === 'pending' && !totals.sent && !totals.bounced && !totals.pending;
+  const sendLabel = campaign.status === 'sending' || (totals.pending || 0) > 0 ? 'Continue' : 'Send';
   const actionHtml = actions
     ? `<td class="row-actions">
-        <button class="btn btn-primary btn-small" data-send="${campaign.id}">Send</button>
+        <button class="btn btn-primary btn-small" data-send="${campaign.id}">${sendLabel}</button>
+        ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-bounces="${campaign.id}" data-bounce-name="${escapeHtml(campaign.name)}">Bounced</button>` : ''}
         <button class="btn btn-ghost btn-small" data-test="${campaign.id}">Test send</button>
         <button class="btn btn-danger btn-small" data-delete-campaign="${campaign.id}">Delete</button>
       </td>`
     : '';
   return `<tr>
-    <td>${campaign.name}</td>
-    <td>${statusBadge(campaign.status)}</td>
+    <td>${escapeHtml(campaign.name)}</td>
+    <td>${statusBadge(campaign.status)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} left</span>` : ''}</td>
     <td>${empty ? '—' : fmtNum(totals.sent)}</td>
+    <td>${empty ? '—' : fmtNum(totals.bounced)}</td>
     <td>${empty ? '—' : fmtNum(totals.opened)}</td>
     <td>${empty ? '—' : fmtNum(totals.clicked)}</td>
     <td>${fmtDate(campaign.scheduledAt)}</td>
@@ -288,12 +301,15 @@ async function loadDashboard() {
     data.kpis.openRate >= 0.4 ? '↗ Good Engagement' : 'Keep testing subjects';
   document.getElementById('kpi-bounce-note').className =
     data.kpis.bounceRate > 0.02 ? 'kpi-note bad' : 'kpi-note good';
-  document.getElementById('kpi-bounce-note').textContent =
-    data.kpis.bounceRate > 0.02 ? '↘ Needs Attention' : 'Healthy';
+  document.getElementById('kpi-bounce-note').textContent = data.kpis.bounced
+    ? `${fmtNum(data.kpis.bounced)} bounced`
+    : data.kpis.bounceRate > 0.02
+      ? '↘ Needs Attention'
+      : 'Healthy';
 
   document.getElementById('recent-campaigns-body').innerHTML = data.recent.length
     ? data.recent.slice(0, 5).map((c) => campaignRow(c)).join('')
-    : '<tr><td colspan="6" class="empty">No campaigns yet</td></tr>';
+            : '<tr><td colspan="7" class="empty">No campaigns yet</td></tr>';
 
   document.getElementById('upcoming-schedule').innerHTML = data.upcoming.length
     ? data.upcoming
@@ -317,14 +333,14 @@ async function loadCampaigns() {
   const campaigns = await api('/campaigns');
   document.getElementById('campaigns-body').innerHTML = campaigns.length
     ? campaigns.map((c) => campaignRow(c, { actions: true })).join('')
-    : '<tr><td colspan="7" class="empty">No campaigns yet</td></tr>';
+    : '<tr><td colspan="8" class="empty">No campaigns yet</td></tr>';
   document.getElementById('reports-grid').innerHTML = campaigns.length
     ? campaigns
         .map(
           (c) => `<article class="card kpi">
             <div class="kpi-label">${c.name}</div>
             <div class="kpi-value">${c.status === 'pending' ? '—' : pct(c.rates?.openRate)}</div>
-            <div class="kpi-note">${statusBadge(c.status)} · ${fmtNum(c.totals?.clicked || 0)} clicks</div>
+            <div class="kpi-note">${statusBadge(c.status)} · ${fmtNum(c.totals?.bounced || 0)} bounced · ${fmtNum(c.totals?.pending || 0)} left</div>
           </article>`
         )
         .join('')
@@ -332,28 +348,33 @@ async function loadCampaigns() {
 }
 
 async function loadRecipients() {
-  const recipients = await api('/recipients');
+  const path = recipientFilter ? `/recipients?status=${encodeURIComponent(recipientFilter)}` : '/recipients';
+  const recipients = await api(path);
   document.getElementById('recipients-body').innerHTML = recipients.length
     ? recipients
         .map(
           (r) => `<tr>
-            <td>${r.name}</td>
-            <td>${r.email}</td>
-            <td>${r.timezone}</td>
-            <td>${r.notes || '—'}</td>
+            <td>${escapeHtml(r.name)}</td>
+            <td>${escapeHtml(r.email)}</td>
+            <td>${escapeHtml(r.timezone)}</td>
+            <td>${escapeHtml(r.notes || '—')}</td>
             <td><span class="status-dot ${r.status}"></span>${r.status}</td>
+            <td>${escapeHtml(r.lastError || '—')}</td>
             <td class="row-actions">
               <button class="btn btn-danger btn-small" data-delete-recipient="${r.id}">Delete</button>
             </td>
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="6" class="empty">No recipients yet</td></tr>';
+    : '<tr><td colspan="7" class="empty">No recipients yet</td></tr>';
 
-  document.getElementById('c-recipients').innerHTML = recipients
-    .filter((r) => r.status === 'active')
+  const pickerList =
+    recipientFilter && recipientFilter !== 'active'
+      ? await api('/recipients?status=active')
+      : recipients.filter((r) => r.status === 'active');
+  document.getElementById('c-recipients').innerHTML = pickerList
     .map(
-      (r) => `<label><input type="checkbox" name="recipientIds" value="${r.id}" /> ${r.name} · ${r.email}</label>`
+      (r) => `<label><input type="checkbox" name="recipientIds" value="${r.id}" /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`
     )
     .join('') || '<p class="muted">Add recipients first</p>';
 }
@@ -410,7 +431,10 @@ async function loadSettings() {
     gmailEl.innerHTML = `<span class="sendgrid-pill live">Gmail connected · ${google.email}</span>`;
     actions.innerHTML =
       me.user.role === 'owner'
-        ? '<button class="btn btn-ghost" id="gmail-disconnect" type="button">Disconnect Gmail</button>'
+        ? `<a class="btn btn-primary" href="/auth/google">Reconnect Gmail</a>
+           <button class="btn btn-ghost" id="sync-gmail-bounces" type="button">Check bounce inbox</button>
+           <button class="btn btn-ghost" id="gmail-disconnect" type="button">Disconnect Gmail</button>
+           <p class="muted">Reconnect once so DeliverIQ can read bounce notices. Then Check bounce inbox after a send.</p>`
         : '';
   } else if (google.configured) {
     gmailEl.innerHTML = '<span class="sendgrid-pill dry">Gmail ready — connect your Google account</span>';
@@ -471,23 +495,86 @@ document.addEventListener('click', (event) => {
   if (jump) location.hash = jump.dataset.page;
 });
 
+async function sendCampaignBatches(campaignId) {
+  sendingCampaignId = campaignId;
+  let remaining = 1;
+  let totalSent = 0;
+  let totalFailed = 0;
+  try {
+    while (remaining > 0) {
+      const result = await api(`/campaigns/${campaignId}/send`, { method: 'POST' });
+      totalSent += result.enqueued || 0;
+      totalFailed += result.failed || 0;
+      remaining = result.remaining || 0;
+      showToast(
+        remaining
+          ? `Sent ${totalSent}. ${remaining} left…`
+          : `Finished: ${totalSent} sent${totalFailed ? `, ${totalFailed} bounced` : ''}`
+      );
+      await loadCampaigns();
+      await loadDashboard();
+    }
+  } finally {
+    sendingCampaignId = null;
+  }
+}
+
+async function showCampaignBounces(campaignId, name) {
+  const card = document.getElementById('campaign-bounces-card');
+  const rows = await api(`/campaigns/${campaignId}/bounces`);
+  document.getElementById('campaign-bounces-title').textContent = `Bounced · ${name}`;
+  document.getElementById('campaign-bounces-body').innerHTML = rows.length
+    ? rows
+        .map(
+          (row) => `<tr>
+            <td>${escapeHtml(row.recipient?.name || '')}</td>
+            <td>${escapeHtml(row.recipient?.email || '')}</td>
+            <td>${escapeHtml(row.error || row.recipient?.lastError || 'Bounced')}</td>
+            <td class="row-actions">
+              <button class="btn btn-danger btn-small" data-delete-recipient="${row.recipient?.id || ''}">Delete</button>
+            </td>
+          </tr>`
+        )
+        .join('')
+    : '<tr><td colspan="4" class="empty">No bounced emails in this campaign</td></tr>';
+  card.hidden = false;
+}
+
+async function syncGmailBounces() {
+  try {
+    const result = await api('/campaigns/sync-bounces', { method: 'POST' });
+    showToast(
+      result.marked
+        ? `Marked ${result.marked} bounced address${result.marked === 1 ? '' : 'es'}`
+        : 'No bounce notices matched your list'
+    );
+    await loadRecipients();
+    await loadCampaigns();
+    await loadDashboard();
+  } catch (err) {
+    showToast(err.message);
+    if (/Reconnect Gmail/i.test(err.message)) {
+      location.hash = 'settings';
+    }
+  }
+}
+
 document.addEventListener('click', async (event) => {
   const sendBtn = event.target.closest('[data-send]');
   const testBtn = event.target.closest('[data-test]');
+  const viewBounces = event.target.closest('[data-view-bounces]');
   try {
     if (sendBtn) {
-      if (!confirm('Send this campaign to all eligible recipients now?')) return;
-      const result = await api(`/campaigns/${sendBtn.dataset.send}/send`, { method: 'POST' });
-      if (result.enqueued) {
-        showToast(`Sent ${result.enqueued} email${result.enqueued === 1 ? '' : 's'}`);
-      } else {
-        showToast('Nothing to send — already sent or recipients inactive');
+      if (sendingCampaignId) {
+        showToast('A send is already running');
+        return;
       }
-      if (result.failed) {
-        showToast(`${result.failed} failed${result.errors?.[0]?.error ? `: ${result.errors[0].error}` : ''}`);
-      }
-      await loadCampaigns();
-      await loadDashboard();
+      const resume = sendBtn.textContent.trim() === 'Continue';
+      if (!resume && !confirm('Send this campaign to all eligible recipients now?')) return;
+      await sendCampaignBatches(sendBtn.dataset.send);
+    }
+    if (viewBounces) {
+      await showCampaignBounces(viewBounces.dataset.viewBounces, viewBounces.dataset.bounceName || 'Campaign');
     }
     if (testBtn) {
       const email = prompt('Send a test to which email?', currentUser?.email || '');
@@ -513,6 +600,10 @@ document.addEventListener('click', async (event) => {
       await api(`/recipients/${delRecipient.dataset.deleteRecipient}`, { method: 'DELETE' });
       showToast('Recipient deleted');
       await loadRecipients();
+      const bouncesBody = document.getElementById('campaign-bounces-body');
+      if (bouncesBody && !document.getElementById('campaign-bounces-card')?.hidden) {
+        delRecipient.closest('tr')?.remove();
+      }
     }
     if (delTemplate) {
       if (!confirm('Delete this template? This cannot be undone.')) return;
@@ -699,13 +790,44 @@ document.addEventListener('click', async (event) => {
     }
     return;
   }
-  if (event.target.id !== 'gmail-disconnect') return;
-  try {
-    await api('/auth/google/disconnect', { method: 'POST' });
-    showToast('Gmail disconnected');
-    await loadSettings();
-  } catch (err) {
-    showToast(err.message);
+  if (event.target.id === 'gmail-disconnect') {
+    try {
+      await api('/auth/google/disconnect', { method: 'POST' });
+      showToast('Gmail disconnected');
+      await loadSettings();
+    } catch (err) {
+      showToast(err.message);
+    }
+    return;
+  }
+  if (event.target.id === 'sync-gmail-bounces' || event.target.id === 'sync-bounces-btn') {
+    await syncGmailBounces();
+    return;
+  }
+  if (event.target.id === 'remove-bounced-btn') {
+    if (!confirm('Delete all bounced recipients from the list?')) return;
+    try {
+      const result = await api('/recipients/bounced', { method: 'DELETE' });
+      showToast(`Removed ${result.deleted} bounced contact${result.deleted === 1 ? '' : 's'}`);
+      await loadRecipients();
+      await loadCampaigns();
+      await loadDashboard();
+    } catch (err) {
+      showToast(err.message);
+    }
+    return;
+  }
+  if (event.target.id === 'hide-bounces-btn') {
+    document.getElementById('campaign-bounces-card').hidden = true;
+    return;
+  }
+  const filterBtn = event.target.closest('[data-recipient-filter]');
+  if (filterBtn) {
+    recipientFilter = filterBtn.dataset.recipientFilter || '';
+    document.querySelectorAll('[data-recipient-filter]').forEach((btn) => {
+      btn.classList.toggle('is-active', btn === filterBtn);
+    });
+    await loadRecipients();
   }
 });
 

@@ -86,6 +86,7 @@ model Recipient {
   status             RecipientStatus @default(active)
   timezone           String          @default("UTC")
   notes              String          @default("")
+  lastError          String          @default("") @map("last_error")
   unsubscribeToken   String          @unique @default(uuid()) @map("unsubscribe_token")
   createdAt          DateTime        @default(now()) @map("created_at")
 
@@ -129,6 +130,7 @@ model CampaignRecipient {
   campaignId  String                   @map("campaign_id")
   recipientId String                   @map("recipient_id")
   status      CampaignRecipientStatus
+  error       String                   @default("")
   sentAt      DateTime?                @map("sent_at")
 
   campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)

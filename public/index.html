@@ -176,13 +176,14 @@
                         <th>Campaign Name</th>
                         <th>Status</th>
                         <th>Sent</th>
+                        <th>Bounced</th>
                         <th>Opens</th>
                         <th>Clicks</th>
                         <th>Date</th>
                       </tr>
                     </thead>
                     <tbody id="recent-campaigns-body">
-                      <tr><td colspan="6" class="empty">No campaigns yet</td></tr>
+                      <tr><td colspan="7" class="empty">No campaigns yet</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -233,6 +234,7 @@
                       <th>Campaign Name</th>
                       <th>Status</th>
                       <th>Sent</th>
+                      <th>Bounced</th>
                       <th>Opens</th>
                       <th>Clicks</th>
                       <th>Date</th>
@@ -240,6 +242,25 @@
                     </tr>
                   </thead>
                   <tbody id="campaigns-body"></tbody>
+                </table>
+              </div>
+            </article>
+            <article class="card" id="campaign-bounces-card" hidden>
+              <div class="card-head">
+                <h2 id="campaign-bounces-title">Bounced emails</h2>
+                <button class="btn btn-ghost btn-small" type="button" id="hide-bounces-btn">Close</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Reason</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="campaign-bounces-body"></tbody>
                 </table>
               </div>
             </article>
@@ -281,7 +302,18 @@
           </section>
 
           <section id="page-recipients" class="page">
-            <div class="page-head"><h1>Recipients</h1></div>
+            <div class="page-head">
+              <h1>Recipients</h1>
+              <div class="row-actions">
+                <button class="btn btn-ghost" type="button" id="sync-bounces-btn">Check Gmail bounces</button>
+                <button class="btn btn-danger" type="button" id="remove-bounced-btn">Remove bounced</button>
+              </div>
+            </div>
+            <div class="filter-row" id="recipient-filters">
+              <button class="btn btn-ghost btn-small is-active" type="button" data-recipient-filter="">All</button>
+              <button class="btn btn-ghost btn-small" type="button" data-recipient-filter="active">Active</button>
+              <button class="btn btn-ghost btn-small" type="button" data-recipient-filter="bounced">Bounced</button>
+            </div>
             <article class="card" style="margin-bottom: 16px">
               <div class="card-head"><h2>Import CSV or add a contact</h2></div>
               <form id="csv-form" class="form-grid">
@@ -334,6 +366,7 @@
                       <th>Timezone</th>
                       <th>Notes</th>
                       <th>Status</th>
+                      <th>Bounce reason</th>
                       <th></th>
                     </tr>
                   </thead>

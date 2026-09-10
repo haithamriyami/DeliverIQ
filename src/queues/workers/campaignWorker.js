@@ -3,7 +3,7 @@ import { prisma } from '../../lib/prisma.js';
 import { redisConnection } from '../../config/redis.js';
 import { CAMPAIGN_QUEUE_NAME } from '../campaignQueue.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from '../../services/emailService.js';
-import { maybeCompleteCampaign, recordSend } from '../../services/campaignService.js';
+import { maybeCompleteCampaign, recordBounce, recordSend } from '../../services/campaignService.js';
 
 export function createCampaignWorker() {
   const worker = new Worker(
@@ -43,15 +43,20 @@ export function createCampaignWorker() {
         return { skipped: true, reason: 'already_sent' };
       }
 
-      await sendCampaignEmail({
-        to: recipient.email,
-        name: recipient.name,
-        subject: campaign.subject,
-        html: campaign.template.body,
-        campaignId,
-        recipientId,
-        unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
-      });
+      try {
+        await sendCampaignEmail({
+          to: recipient.email,
+          name: recipient.name,
+          subject: campaign.subject,
+          html: campaign.template.body,
+          campaignId,
+          recipientId,
+          unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
+        });
+      } catch (err) {
+        await recordBounce({ campaignId, recipientId, error: err.message });
+        throw err;
+      }
 
       await recordSend({ campaignId, recipientId });
       await maybeCompleteCampaign(campaignId);

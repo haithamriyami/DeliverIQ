@@ -21,10 +21,18 @@ export async function createRecipient({ email, name, timezone, notes }) {
   });
 }
 
-export async function listRecipients() {
+export async function listRecipients(status) {
   return prisma.recipient.findMany({
+    where: status ? { status } : undefined,
     orderBy: { createdAt: 'desc' },
   });
+}
+
+export async function deleteBouncedRecipients() {
+  const result = await prisma.recipient.deleteMany({
+    where: { status: 'bounced' },
+  });
+  return { deleted: result.count };
 }
 
 export async function deleteRecipient(id) {
