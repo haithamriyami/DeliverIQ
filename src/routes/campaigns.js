@@ -10,6 +10,7 @@ router.delete('/:id', ...campaignsController.remove);
 router.post('/:id/send', ...campaignsController.send);
 router.post('/:id/test', ...campaignsController.testSend);
 router.get('/:id/report', ...campaignsController.report);
-router.get('/:id/bounces', ...campaignsController.bounces);
+router.get('/:id/audience', ...campaignsController.audience);
+router.get('/:id/bounces', ...campaignsController.audience);
 
 export default router;

@@ -631,8 +631,14 @@ tr:last-child td {
   margin-right: 6px;
 }
 
-.status-dot.active {
+.status-dot.active,
+.status-dot.sent {
   background: var(--green);
+}
+
+.status-dot.opened,
+.status-dot.clicked {
+  background: #2f6fed;
 }
 
 .status-dot.bounced {

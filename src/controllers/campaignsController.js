@@ -81,10 +81,11 @@ export const testSend = [
   }),
 ];
 
-export const bounces = [
+export const audience = [
   validate(campaignIdSchema),
   asyncHandler(async (req, res) => {
-    const rows = await campaignService.listCampaignBounces(req.validated.params.id);
+    const kind = req.path.endsWith('/bounces') || req.query.kind === 'bounced' ? 'bounced' : 'sent';
+    const rows = await campaignService.listCampaignAudience(req.validated.params.id, kind);
     res.json(rows);
   }),
 ];

@@ -347,10 +347,15 @@ export async function recordBounce({ campaignId, recipientId, error }) {
   });
 }
 
-export async function listCampaignBounces(campaignId) {
+export async function listCampaignAudience(campaignId, kind = 'sent') {
   await getCampaignById(campaignId);
+  const where =
+    kind === 'bounced'
+      ? { campaignId, status: 'bounced' }
+      : { campaignId, status: { in: ['sent', 'opened', 'clicked'] } };
+
   return prisma.campaignRecipient.findMany({
-    where: { campaignId, status: 'bounced' },
+    where,
     include: {
       recipient: {
         select: { id: true, email: true, name: true, status: true, lastError: true },
@@ -358,6 +363,10 @@ export async function listCampaignBounces(campaignId) {
     },
     orderBy: { sentAt: 'desc' },
   });
+}
+
+export async function listCampaignBounces(campaignId) {
+  return listCampaignAudience(campaignId, 'bounced');
 }
 
 export async function syncBouncesFromGmail() {

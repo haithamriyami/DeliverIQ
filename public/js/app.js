@@ -194,7 +194,8 @@ function campaignRow(campaign, { actions = false } = {}) {
   const actionHtml = actions
     ? `<td class="row-actions">
         <button class="btn btn-primary btn-small" data-send="${campaign.id}">${sendLabel}</button>
-        ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-bounces="${campaign.id}" data-bounce-name="${escapeHtml(campaign.name)}">Bounced</button>` : ''}
+        ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
+        ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="bounced" data-audience-name="${escapeHtml(campaign.name)}">Bounced (${fmtNum(totals.bounced)})</button>` : ''}
         <button class="btn btn-ghost btn-small" data-test="${campaign.id}">Test send</button>
         <button class="btn btn-danger btn-small" data-delete-campaign="${campaign.id}">Delete</button>
       </td>`
@@ -519,24 +520,25 @@ async function sendCampaignBatches(campaignId) {
   }
 }
 
-async function showCampaignBounces(campaignId, name) {
-  const card = document.getElementById('campaign-bounces-card');
-  const rows = await api(`/campaigns/${campaignId}/bounces`);
-  document.getElementById('campaign-bounces-title').textContent = `Bounced · ${name}`;
-  document.getElementById('campaign-bounces-body').innerHTML = rows.length
+async function showCampaignAudience(campaignId, name, kind) {
+  const card = document.getElementById('campaign-audience-card');
+  const rows = await api(`/campaigns/${campaignId}/audience?kind=${encodeURIComponent(kind)}`);
+  const label = kind === 'bounced' ? 'Bounced' : 'Sent';
+  document.getElementById('campaign-audience-title').textContent = `${label} · ${name} (${rows.length})`;
+  document.getElementById('campaign-audience-body').innerHTML = rows.length
     ? rows
-        .map(
-          (row) => `<tr>
+        .map((row) => {
+          const status = row.status || (kind === 'bounced' ? 'bounced' : 'sent');
+          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : status;
+          return `<tr>
             <td>${escapeHtml(row.recipient?.name || '')}</td>
             <td>${escapeHtml(row.recipient?.email || '')}</td>
-            <td>${escapeHtml(row.error || row.recipient?.lastError || 'Bounced')}</td>
-            <td class="row-actions">
-              <button class="btn btn-danger btn-small" data-delete-recipient="${row.recipient?.id || ''}">Delete</button>
-            </td>
-          </tr>`
-        )
+            <td><span class="status-dot ${status}"></span>${status}</td>
+            <td>${escapeHtml(detail)}</td>
+          </tr>`;
+        })
         .join('')
-    : '<tr><td colspan="4" class="empty">No bounced emails in this campaign</td></tr>';
+    : `<tr><td colspan="4" class="empty">No ${label.toLowerCase()} emails in this campaign</td></tr>`;
   card.hidden = false;
 }
 
@@ -562,7 +564,7 @@ async function syncGmailBounces() {
 document.addEventListener('click', async (event) => {
   const sendBtn = event.target.closest('[data-send]');
   const testBtn = event.target.closest('[data-test]');
-  const viewBounces = event.target.closest('[data-view-bounces]');
+  const viewAudience = event.target.closest('[data-view-audience]');
   try {
     if (sendBtn) {
       if (sendingCampaignId) {
@@ -573,8 +575,12 @@ document.addEventListener('click', async (event) => {
       if (!resume && !confirm('Send this campaign to all eligible recipients now?')) return;
       await sendCampaignBatches(sendBtn.dataset.send);
     }
-    if (viewBounces) {
-      await showCampaignBounces(viewBounces.dataset.viewBounces, viewBounces.dataset.bounceName || 'Campaign');
+    if (viewAudience) {
+      await showCampaignAudience(
+        viewAudience.dataset.viewAudience,
+        viewAudience.dataset.audienceName || 'Campaign',
+        viewAudience.dataset.audienceKind || 'sent'
+      );
     }
     if (testBtn) {
       const email = prompt('Send a test to which email?', currentUser?.email || '');
@@ -600,8 +606,8 @@ document.addEventListener('click', async (event) => {
       await api(`/recipients/${delRecipient.dataset.deleteRecipient}`, { method: 'DELETE' });
       showToast('Recipient deleted');
       await loadRecipients();
-      const bouncesBody = document.getElementById('campaign-bounces-body');
-      if (bouncesBody && !document.getElementById('campaign-bounces-card')?.hidden) {
+      const audienceBody = document.getElementById('campaign-audience-body');
+      if (audienceBody && !document.getElementById('campaign-audience-card')?.hidden) {
         delRecipient.closest('tr')?.remove();
       }
     }
@@ -817,8 +823,9 @@ document.addEventListener('click', async (event) => {
     }
     return;
   }
-  if (event.target.id === 'hide-bounces-btn') {
-    document.getElementById('campaign-bounces-card').hidden = true;
+  if (event.target.id === 'hide-audience-btn' || event.target.id === 'hide-bounces-btn') {
+    const card = document.getElementById('campaign-audience-card');
+    if (card) card.hidden = true;
     return;
   }
   const filterBtn = event.target.closest('[data-recipient-filter]');
