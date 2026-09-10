@@ -645,6 +645,10 @@ tr:last-child td {
   background: var(--red);
 }
 
+.status-dot.pending {
+  background: var(--orange);
+}
+
 .status-dot.unsubscribed {
   background: var(--orange);
 }

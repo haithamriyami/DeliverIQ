@@ -358,7 +358,36 @@ export async function recordBounce({ campaignId, recipientId, error }) {
 }
 
 export async function listCampaignAudience(campaignId, kind = 'sent') {
-  await getCampaignById(campaignId);
+  const campaign = await getCampaignById(campaignId);
+
+  if (kind === 'pending') {
+    const processed = await prisma.campaignRecipient.findMany({
+      where: { campaignId },
+      select: { recipientId: true },
+    });
+    const processedIds = new Set(processed.map((row) => row.recipientId));
+    const people = await prisma.recipient.findMany({
+      where: {
+        id: { in: campaign.recipientIds },
+        status: 'active',
+      },
+      orderBy: { email: 'asc' },
+    });
+    return people
+      .filter((person) => !processedIds.has(person.id))
+      .map((person) => ({
+        status: 'pending',
+        error: 'Not sent yet',
+        recipient: {
+          id: person.id,
+          email: person.email,
+          name: person.name,
+          status: person.status,
+          lastError: person.lastError,
+        },
+      }));
+  }
+
   const where =
     kind === 'bounced'
       ? { campaignId, status: 'bounced' }

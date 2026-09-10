@@ -66,7 +66,10 @@ function pct(n) {
   return `${Math.round((Number(n) || 0) * 1000) / 10}%`;
 }
 
-function statusBadge(status) {
+function statusBadge(status, pending = 0) {
+  if (status === 'sending' && pending > 0) {
+    return '<span class="badge sending">Paused</span>';
+  }
   const map = {
     completed: ['completed', 'Completed'],
     sending: ['sending', 'Sending...'],
@@ -197,6 +200,7 @@ function campaignRow(campaign, { actions = false } = {}) {
     ? `<td class="row-actions">
         <button class="btn btn-primary btn-small" data-send="${campaign.id}">${sendLabel}</button>
         ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
+        ${(totals.pending || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="pending" data-audience-name="${escapeHtml(campaign.name)}">Not sent (${fmtNum(totals.pending)})</button>` : ''}
         ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="bounced" data-audience-name="${escapeHtml(campaign.name)}">Bounced (${fmtNum(totals.bounced)})</button>` : ''}
         <button class="btn btn-ghost btn-small" data-test="${campaign.id}">Test send</button>
         <button class="btn btn-danger btn-small" data-delete-campaign="${campaign.id}">Delete</button>
@@ -204,7 +208,7 @@ function campaignRow(campaign, { actions = false } = {}) {
     : '';
   return `<tr>
     <td>${escapeHtml(campaign.name)}</td>
-    <td>${statusBadge(campaign.status)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} left</span>` : ''}</td>
+    <td>${statusBadge(campaign.status, totals.pending || 0)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent</span>` : ''}</td>
     <td>${empty ? '—' : fmtNum(totals.sent)}</td>
     <td>${empty ? '—' : fmtNum(totals.bounced)}</td>
     <td>${empty ? '—' : fmtNum(totals.opened)}</td>
@@ -343,7 +347,7 @@ async function loadCampaigns() {
           (c) => `<article class="card kpi">
             <div class="kpi-label">${c.name}</div>
             <div class="kpi-value">${c.status === 'pending' ? '—' : pct(c.rates?.openRate)}</div>
-            <div class="kpi-note">${statusBadge(c.status)} · ${fmtNum(c.totals?.bounced || 0)} bounced · ${fmtNum(c.totals?.pending || 0)} left</div>
+            <div class="kpi-note">${statusBadge(c.status, c.totals?.pending || 0)} · ${fmtNum(c.totals?.bounced || 0)} bounced · ${fmtNum(c.totals?.pending || 0)} not sent</div>
           </article>`
         )
         .join('')
@@ -539,13 +543,13 @@ async function sendCampaignBatches(campaignId) {
 async function showCampaignAudience(campaignId, name, kind) {
   const card = document.getElementById('campaign-audience-card');
   const rows = await api(`/campaigns/${campaignId}/audience?kind=${encodeURIComponent(kind)}`);
-  const label = kind === 'bounced' ? 'Bounced' : 'Sent';
+  const label = kind === 'bounced' ? 'Bounced' : kind === 'pending' ? 'Not sent' : 'Sent';
   document.getElementById('campaign-audience-title').textContent = `${label} · ${name} (${rows.length})`;
   document.getElementById('campaign-audience-body').innerHTML = rows.length
     ? rows
         .map((row) => {
-          const status = row.status || (kind === 'bounced' ? 'bounced' : 'sent');
-          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : status;
+          const status = row.status || (kind === 'bounced' ? 'bounced' : kind === 'pending' ? 'pending' : 'sent');
+          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : kind === 'pending' ? 'Waiting — click Continue to send' : status;
           return `<tr>
             <td>${escapeHtml(row.recipient?.name || '')}</td>
             <td>${escapeHtml(row.recipient?.email || '')}</td>
