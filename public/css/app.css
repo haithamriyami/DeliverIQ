@@ -868,6 +868,22 @@ tr:last-child td {
   display: flex;
   gap: 8px;
   margin: 0 0 14px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.filter-row input[type='search'],
+#c-recipient-search {
+  flex: 1;
+  min-width: 180px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+#c-recipient-search {
+  margin-bottom: 10px;
 }
 
 .filter-row .is-active {

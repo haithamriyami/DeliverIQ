@@ -217,13 +217,19 @@ export async function maybeCompleteCampaign(campaignId) {
   });
   const processedIds = new Set(sentRecords.map((row) => row.recipientId));
 
-  const remaining = await prisma.recipient.findMany({
-    where: {
-      id: { in: campaign.recipientIds.filter((id) => !processedIds.has(id)) },
-      status: 'active',
-    },
-    select: { id: true },
+  const existing = await prisma.recipient.findMany({
+    where: { id: { in: campaign.recipientIds } },
+    select: { id: true, status: true },
   });
+  const liveIds = existing.map((row) => row.id);
+  if (liveIds.length !== campaign.recipientIds.length) {
+    await prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { recipientIds: liveIds },
+    });
+  }
+
+  const remaining = existing.filter((row) => row.status === 'active' && !processedIds.has(row.id));
 
   if (remaining.length === 0) {
     return prisma.campaign.update({
@@ -250,7 +256,11 @@ export async function getCampaignReport(campaignId) {
   }
 
   const delivered = counts.sent + counts.opened + counts.clicked;
-  const funnel = funnelFromCounts(counts, campaign.recipientIds.length);
+  const livePending = await livePendingCount(campaign);
+  const funnel = funnelFromCounts(counts, {
+    audienceSize: campaign.recipientIds.length,
+    pending: livePending,
+  });
   const opened = counts.opened + counts.clicked;
 
   return {
@@ -451,17 +461,16 @@ function emptyCounts() {
   return { sent: 0, bounced: 0, opened: 0, clicked: 0 };
 }
 
-function funnelFromCounts(counts, audienceSize = 0) {
+function funnelFromCounts(counts, { audienceSize = 0, pending = 0 } = {}) {
   const delivered = counts.sent + counts.opened + counts.clicked;
   const attempted = delivered + counts.bounced;
   const opened = counts.opened + counts.clicked;
-  const pending = Math.max(0, audienceSize - attempted);
   return {
     sent: delivered,
     bounced: counts.bounced,
     opened,
     clicked: counts.clicked,
-    pending,
+    pending: pending || Math.max(0, audienceSize - attempted),
     attempted,
     bounceRate: attempted ? counts.bounced / attempted : 0,
     openRate: delivered ? opened / delivered : 0,
@@ -471,10 +480,25 @@ function funnelFromCounts(counts, audienceSize = 0) {
 
 export async function listCampaignsWithStats() {
   const campaigns = await listCampaigns();
-  const grouped = await prisma.campaignRecipient.groupBy({
-    by: ['campaignId', 'status'],
-    _count: { _all: true },
-  });
+  if (campaigns.length === 0) {
+    return [];
+  }
+
+  const campaignIds = campaigns.map((campaign) => campaign.id);
+  const [grouped, rows, people] = await Promise.all([
+    prisma.campaignRecipient.groupBy({
+      by: ['campaignId', 'status'],
+      _count: { _all: true },
+    }),
+    prisma.campaignRecipient.findMany({
+      where: { campaignId: { in: campaignIds } },
+      select: { campaignId: true, recipientId: true },
+    }),
+    prisma.recipient.findMany({
+      where: { id: { in: [...new Set(campaigns.flatMap((campaign) => campaign.recipientIds))] } },
+      select: { id: true, status: true },
+    }),
+  ]);
 
   const byCampaign = new Map();
   for (const row of grouped) {
@@ -484,27 +508,87 @@ export async function listCampaignsWithStats() {
     byCampaign.get(row.campaignId)[row.status] = row._count._all;
   }
 
-  return campaigns.map((campaign) => {
-    const totals = funnelFromCounts(
-      byCampaign.get(campaign.id) || emptyCounts(),
-      campaign.recipientIds.length
-    );
-    return {
-      ...campaign,
-      totals: {
-        sent: totals.sent,
-        bounced: totals.bounced,
-        opened: totals.opened,
-        clicked: totals.clicked,
-        pending: totals.pending,
-      },
-      rates: {
-        bounceRate: totals.bounceRate,
-        openRate: totals.openRate,
-        clickRate: totals.clickRate,
-      },
-    };
-  });
+  const processedByCampaign = new Map();
+  for (const row of rows) {
+    if (!processedByCampaign.has(row.campaignId)) {
+      processedByCampaign.set(row.campaignId, new Set());
+    }
+    processedByCampaign.get(row.campaignId).add(row.recipientId);
+  }
+
+  const peopleById = new Map(people.map((person) => [person.id, person]));
+
+  const reconciled = await Promise.all(
+    campaigns.map(async (campaign) => {
+      const liveIds = campaign.recipientIds.filter((id) => peopleById.has(id));
+      if (liveIds.length !== campaign.recipientIds.length) {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { recipientIds: liveIds },
+        });
+        campaign.recipientIds = liveIds;
+      }
+
+      const processed = processedByCampaign.get(campaign.id) || new Set();
+      const pending = liveIds.filter((id) => {
+        const person = peopleById.get(id);
+        return person?.status === 'active' && !processed.has(id);
+      }).length;
+
+      if (pending === 0 && campaign.status === 'sending') {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: 'completed' },
+        });
+        campaign.status = 'completed';
+      }
+
+      const totals = funnelFromCounts(byCampaign.get(campaign.id) || emptyCounts(), {
+        audienceSize: liveIds.length,
+        pending,
+      });
+      return {
+        ...campaign,
+        totals: {
+          sent: totals.sent,
+          bounced: totals.bounced,
+          opened: totals.opened,
+          clicked: totals.clicked,
+          pending: totals.pending,
+        },
+        rates: {
+          bounceRate: totals.bounceRate,
+          openRate: totals.openRate,
+          clickRate: totals.clickRate,
+        },
+      };
+    })
+  );
+
+  return reconciled;
+}
+
+async function livePendingCount(campaign) {
+  const [existing, processed] = await Promise.all([
+    prisma.recipient.findMany({
+      where: { id: { in: campaign.recipientIds } },
+      select: { id: true, status: true },
+    }),
+    prisma.campaignRecipient.findMany({
+      where: { campaignId: campaign.id },
+      select: { recipientId: true },
+    }),
+  ]);
+  const processedIds = new Set(processed.map((row) => row.recipientId));
+  const liveIds = existing.map((row) => row.id);
+  if (liveIds.length !== campaign.recipientIds.length) {
+    await prisma.campaign.update({
+      where: { id: campaign.id },
+      data: { recipientIds: liveIds },
+    });
+    campaign.recipientIds = liveIds;
+  }
+  return existing.filter((row) => row.status === 'active' && !processedIds.has(row.id)).length;
 }
 
 export async function getDashboard() {

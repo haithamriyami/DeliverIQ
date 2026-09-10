@@ -14,7 +14,9 @@ let currentUser = null;
 let inviteToken = null;
 let setupRequired = true;
 let recipientFilter = '';
+let recipientSearch = '';
 let sendingCampaignId = null;
+let pickerRecipients = [];
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -349,8 +351,11 @@ async function loadCampaigns() {
 }
 
 async function loadRecipients() {
-  const path = recipientFilter ? `/recipients?status=${encodeURIComponent(recipientFilter)}` : '/recipients';
-  const recipients = await api(path);
+  const params = new URLSearchParams();
+  if (recipientFilter) params.set('status', recipientFilter);
+  if (recipientSearch) params.set('q', recipientSearch);
+  const query = params.toString();
+  const recipients = await api(query ? `/recipients?${query}` : '/recipients');
   document.getElementById('recipients-body').innerHTML = recipients.length
     ? recipients
         .map(
@@ -367,17 +372,28 @@ async function loadRecipients() {
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="7" class="empty">No recipients yet</td></tr>';
+    : '<tr><td colspan="7" class="empty">No recipients match that search</td></tr>';
 
-  const pickerList =
-    recipientFilter && recipientFilter !== 'active'
-      ? await api('/recipients?status=active')
-      : recipients.filter((r) => r.status === 'active');
-  document.getElementById('c-recipients').innerHTML = pickerList
-    .map(
-      (r) => `<label><input type="checkbox" name="recipientIds" value="${r.id}" /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`
-    )
-    .join('') || '<p class="muted">Add recipients first</p>';
+  pickerRecipients = await api('/recipients?status=active');
+  renderRecipientPicker(document.getElementById('c-recipient-search')?.value || '');
+}
+
+function renderRecipientPicker(query) {
+  const needle = String(query || '').trim().toLowerCase();
+  const list = pickerRecipients.filter(
+    (r) =>
+      !needle ||
+      r.name.toLowerCase().includes(needle) ||
+      r.email.toLowerCase().includes(needle) ||
+      String(r.notes || '').toLowerCase().includes(needle)
+  );
+  document.getElementById('c-recipients').innerHTML = list.length
+    ? list
+        .map(
+          (r) => `<label><input type="checkbox" name="recipientIds" value="${r.id}" /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`
+        )
+        .join('')
+    : '<p class="muted">No recipients match that search</p>';
 }
 
 async function loadTemplates() {
@@ -836,6 +852,19 @@ document.addEventListener('click', async (event) => {
     });
     await loadRecipients();
   }
+});
+
+let recipientSearchTimer = null;
+document.getElementById('recipient-search')?.addEventListener('input', (event) => {
+  clearTimeout(recipientSearchTimer);
+  recipientSearchTimer = setTimeout(async () => {
+    recipientSearch = event.target.value.trim();
+    await loadRecipients();
+  }, 250);
+});
+
+document.getElementById('c-recipient-search')?.addEventListener('input', (event) => {
+  renderRecipientPicker(event.target.value);
 });
 
 document.getElementById('invite-form').addEventListener('submit', async (event) => {

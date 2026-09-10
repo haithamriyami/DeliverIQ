@@ -27,7 +27,8 @@ export const list = asyncHandler(async (req, res) => {
   const status = req.query.status;
   const allowed = ['active', 'bounced', 'unsubscribed'];
   const recipients = await recipientService.listRecipients(
-    allowed.includes(status) ? status : undefined
+    allowed.includes(status) ? status : undefined,
+    req.query.q
   );
   res.json(recipients);
 });

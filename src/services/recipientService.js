@@ -21,9 +21,21 @@ export async function createRecipient({ email, name, timezone, notes }) {
   });
 }
 
-export async function listRecipients(status) {
+export async function listRecipients(status, q) {
+  const where = {};
+  if (status) {
+    where.status = status;
+  }
+  const query = String(q || '').trim();
+  if (query) {
+    where.OR = [
+      { email: { contains: query, mode: 'insensitive' } },
+      { name: { contains: query, mode: 'insensitive' } },
+      { notes: { contains: query, mode: 'insensitive' } },
+    ];
+  }
   return prisma.recipient.findMany({
-    where: status ? { status } : undefined,
+    where: Object.keys(where).length ? where : undefined,
     orderBy: { createdAt: 'desc' },
   });
 }
