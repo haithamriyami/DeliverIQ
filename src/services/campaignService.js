@@ -4,6 +4,7 @@ import { campaignQueue, sendJobId } from '../queues/campaignQueue.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
 import { env } from '../config/env.js';
 import { listGmailBounceAddresses } from './gmailService.js';
+import { campaignAssignmentsForRecipients } from './recipientService.js';
 
 const SEND_BATCH_SIZE = 8;
 const SEND_GAP_MS = 1500;
@@ -100,6 +101,27 @@ export async function createCampaign({
 
   if (recipients.length !== uniqueIds.length) {
     throw new HttpError(400, 'One or more recipient IDs are invalid');
+  }
+
+  const assignments = await campaignAssignmentsForRecipients(uniqueIds);
+  const takenIds = uniqueIds.filter((id) => (assignments.get(id) || []).length > 0);
+  if (takenIds.length) {
+    const people = await prisma.recipient.findMany({
+      where: { id: { in: takenIds } },
+      select: { email: true, name: true, id: true },
+    });
+    const detail = people
+      .slice(0, 8)
+      .map((person) => {
+        const names = (assignments.get(person.id) || []).map((campaign) => campaign.name).join(', ');
+        return `${person.email} (${names})`;
+      })
+      .join('; ');
+    const extra = people.length > 8 ? `; and ${people.length - 8} more` : '';
+    throw new HttpError(
+      400,
+      `These people are already on another campaign: ${detail}${extra}`
+    );
   }
 
   return prisma.campaign.create({

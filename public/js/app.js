@@ -375,6 +375,7 @@ async function loadRecipients() {
           (r) => `<tr>
             <td>${escapeHtml(r.name)}</td>
             <td>${escapeHtml(r.email)}</td>
+            <td>${escapeHtml((r.inCampaigns || []).map((c) => c.name).join(', ') || 'Not in a campaign')}</td>
             <td>${escapeHtml(r.timezone)}</td>
             <td>${escapeHtml(r.notes || '—')}</td>
             <td><span class="status-dot ${r.status}"></span>${r.status}</td>
@@ -385,26 +386,46 @@ async function loadRecipients() {
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="7" class="empty">No recipients match that search</td></tr>';
+    : '<tr><td colspan="8" class="empty">No recipients match that search</td></tr>';
 
   pickerRecipients = await api('/recipients?status=active');
   renderRecipientPicker(document.getElementById('c-recipient-search')?.value || '');
 }
 
 function renderRecipientPicker(query) {
+  const box = document.getElementById('c-recipients');
+  const summary = document.getElementById('c-recipient-summary');
+  if (!box) return;
+  const kept = new Set(
+    [...box.querySelectorAll('input[name="recipientIds"]:checked:not(:disabled)')].map((el) => el.value)
+  );
   const needle = String(query || '').trim().toLowerCase();
   const list = pickerRecipients.filter(
     (r) =>
       !needle ||
       r.name.toLowerCase().includes(needle) ||
       r.email.toLowerCase().includes(needle) ||
-      String(r.notes || '').toLowerCase().includes(needle)
+      String(r.notes || '').toLowerCase().includes(needle) ||
+      (r.inCampaigns || []).some((c) => c.name.toLowerCase().includes(needle))
   );
-  document.getElementById('c-recipients').innerHTML = list.length
+  const takenCount = pickerRecipients.filter((r) => (r.inCampaigns || []).length).length;
+  const freeCount = pickerRecipients.length - takenCount;
+  if (summary) {
+    summary.textContent = pickerRecipients.length
+      ? `${fmtNum(freeCount)} available to pick · ${fmtNum(takenCount)} already in a campaign`
+      : '';
+  }
+  box.innerHTML = list.length
     ? list
-        .map(
-          (r) => `<label><input type="checkbox" name="recipientIds" value="${r.id}" /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`
-        )
+        .map((r) => {
+          const campaigns = r.inCampaigns || [];
+          if (campaigns.length) {
+            const names = campaigns.map((c) => c.name).join(', ');
+            return `<label class="is-taken"><input type="checkbox" disabled /> <span>${escapeHtml(r.name)} · ${escapeHtml(r.email)}<span class="taken-tag">Already in ${escapeHtml(names)}</span></span></label>`;
+          }
+          const checked = kept.has(r.id) ? ' checked' : '';
+          return `<label><input type="checkbox" name="recipientIds" value="${r.id}"${checked} /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`;
+        })
         .join('')
     : '<p class="muted">No recipients match that search</p>';
 }
@@ -565,7 +586,7 @@ async function openFollowUpModal(campaignId, campaignName, currentStepName) {
   await loadTemplates();
   document.getElementById('followup-campaign-id').value = campaignId;
   document.getElementById('followup-help').textContent =
-    `This stays on “${campaignName}”. ${currentStepName || 'Email 1'} is left as-is. Bounced contacts are skipped.`;
+    `This stays on “${campaignName}”. You do not pick people again. ${currentStepName || 'Email 1'} stays as-is — choose the next template, like Welcome back or Should I close this out.`;
   document.getElementById('followup-subject').value = '';
   document.getElementById('followup-modal').hidden = false;
   document.getElementById('followup-subject').focus();

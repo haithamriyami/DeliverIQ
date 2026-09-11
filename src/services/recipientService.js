@@ -37,7 +37,62 @@ export async function listRecipients(status, q) {
   return prisma.recipient.findMany({
     where: Object.keys(where).length ? where : undefined,
     orderBy: { createdAt: 'desc' },
+  }).then(async (recipients) => {
+    const assignments = await campaignAssignmentsForRecipients(recipients.map((row) => row.id));
+    return recipients.map((row) => ({
+      ...row,
+      inCampaigns: assignments.get(row.id) || [],
+    }));
   });
+}
+
+export async function campaignAssignmentsForRecipients(recipientIds) {
+  const map = new Map();
+  if (!recipientIds.length) {
+    return map;
+  }
+
+  const idSet = new Set(recipientIds);
+  const [campaigns, rows] = await Promise.all([
+    prisma.campaign.findMany({
+      select: { id: true, name: true, status: true, recipientIds: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+    prisma.campaignRecipient.findMany({
+      where: { recipientId: { in: recipientIds } },
+      select: {
+        recipientId: true,
+        campaign: { select: { id: true, name: true, status: true } },
+      },
+    }),
+  ]);
+
+  const add = (recipientId, campaign) => {
+    if (!campaign || !idSet.has(recipientId)) {
+      return;
+    }
+    if (!map.has(recipientId)) {
+      map.set(recipientId, []);
+    }
+    if (!map.get(recipientId).some((item) => item.id === campaign.id)) {
+      map.get(recipientId).push({
+        id: campaign.id,
+        name: campaign.name,
+        status: campaign.status,
+      });
+    }
+  };
+
+  for (const campaign of campaigns) {
+    for (const id of campaign.recipientIds) {
+      add(id, campaign);
+    }
+  }
+  for (const row of rows) {
+    add(row.recipientId, row.campaign);
+  }
+
+  return map;
 }
 
 export async function deleteBouncedRecipients() {

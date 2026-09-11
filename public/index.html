@@ -367,6 +367,7 @@
                     <tr>
                       <th>Name</th>
                       <th>Email</th>
+                      <th>Campaign</th>
                       <th>Timezone</th>
                       <th>Notes</th>
                       <th>Status</th>
@@ -451,7 +452,9 @@
                 </div>
                 <div class="field full">
                   <label>Recipients</label>
+                  <p class="muted" style="margin: 0 0 8px">People already on another campaign are locked so they cannot be emailed twice. Import new forms first, then only the free contacts can be checked.</p>
                   <input id="c-recipient-search" type="search" placeholder="Search recipients to select" />
+                  <p class="muted" id="c-recipient-summary" style="margin: 8px 0 0"></p>
                   <div class="check-list" id="c-recipients"></div>
                 </div>
                 <div class="field full">
@@ -478,7 +481,7 @@
         </div>
         <form class="form-grid" id="followup-form">
           <input type="hidden" name="campaignId" id="followup-campaign-id" />
-          <p class="muted" id="followup-help">This stays on the same campaign. Email 1 is left as-is.</p>
+          <p class="muted" id="followup-help">This stays on the same campaign. You do not pick people again — the list stays as-is, bounced contacts are skipped, and you only choose the next template.</p>
           <div class="field full">
             <label for="followup-subject">Subject</label>
             <input id="followup-subject" name="subject" required placeholder="Quick follow-up" />
