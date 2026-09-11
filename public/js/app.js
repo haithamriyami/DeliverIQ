@@ -193,22 +193,31 @@ function lockApp() {
 }
 
 function campaignRow(campaign, { actions = false } = {}) {
-  const totals = campaign.totals || {};
-  const empty = campaign.status === 'pending' && !totals.sent && !totals.bounced && !totals.pending;
-  const sendLabel = campaign.status === 'sending' || (totals.pending || 0) > 0 ? 'Continue' : 'Send';
+  const current = campaign.currentStep || {};
+  const totals = current.totals || campaign.totals || {};
+  const status = current.status || campaign.status;
+  const empty = status === 'pending' && !totals.sent && !totals.bounced && !totals.pending;
+  const sendLabel = status === 'sending' || (totals.pending || 0) > 0 ? 'Continue' : 'Send';
+  const showSend = (totals.pending || 0) > 0 || status === 'pending';
+  const stepId = current.id || '';
+  const stepLabel = current.name || 'Email 1';
+  const stepLine = (campaign.steps || [])
+    .map((step) => escapeHtml(step.name))
+    .join(' · ');
   const actionHtml = actions
     ? `<td class="row-actions">
-        <button class="btn btn-primary btn-small" data-send="${campaign.id}">${sendLabel}</button>
-        ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
-        ${(totals.pending || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="pending" data-audience-name="${escapeHtml(campaign.name)}">Not sent (${fmtNum(totals.pending)})</button>` : ''}
-        ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="bounced" data-audience-name="${escapeHtml(campaign.name)}">Bounced (${fmtNum(totals.bounced)})</button>` : ''}
+        ${showSend ? `<button class="btn btn-primary btn-small" data-send="${campaign.id}" data-step="${stepId}">${sendLabel}</button>` : ''}
+        <button class="btn btn-ghost btn-small" data-followup="${campaign.id}" data-followup-name="${escapeHtml(campaign.name)}" data-followup-step="${escapeHtml(stepLabel)}">Follow-up</button>
+        ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-step="${stepId}" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
+        ${(totals.pending || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="pending" data-audience-step="${stepId}" data-audience-name="${escapeHtml(campaign.name)}">Not sent (${fmtNum(totals.pending)})</button>` : ''}
+        ${(totals.bounced || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="bounced" data-audience-step="${stepId}" data-audience-name="${escapeHtml(campaign.name)}">Bounced (${fmtNum(totals.bounced)})</button>` : ''}
         <button class="btn btn-ghost btn-small" data-test="${campaign.id}">Test send</button>
         <button class="btn btn-danger btn-small" data-delete-campaign="${campaign.id}">Delete</button>
       </td>`
     : '';
   return `<tr>
-    <td>${escapeHtml(campaign.name)}</td>
-    <td>${statusBadge(campaign.status, totals.pending || 0)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent</span>` : ''}</td>
+    <td>${escapeHtml(campaign.name)}${stepLine ? `<span class="muted step-line">${stepLine}</span>` : ''}</td>
+    <td>${statusBadge(status, totals.pending || 0)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent · ${escapeHtml(stepLabel)}</span>` : ` <span class="muted">${escapeHtml(stepLabel)}</span>`}</td>
     <td>${empty ? '—' : fmtNum(totals.sent)}</td>
     <td>${empty ? '—' : fmtNum(totals.bounced)}</td>
     <td>${empty ? '—' : fmtNum(totals.opened)}</td>
@@ -415,6 +424,10 @@ async function loadTemplates() {
     : '<p class="empty">No templates yet</p>';
   const select = document.getElementById('c-template');
   select.innerHTML = templates.map((t) => `<option value="${t.id}">${t.name}</option>`).join('');
+  const followSelect = document.getElementById('followup-template');
+  if (followSelect) {
+    followSelect.innerHTML = select.innerHTML;
+  }
 }
 
 function googleRedirectHelp(google) {
@@ -516,20 +529,23 @@ document.addEventListener('click', (event) => {
   if (jump) location.hash = jump.dataset.page;
 });
 
-async function sendCampaignBatches(campaignId) {
+async function sendCampaignBatches(campaignId, stepId) {
   sendingCampaignId = campaignId;
   let remaining = 1;
   let totalSent = 0;
   let totalFailed = 0;
   try {
     while (remaining > 0) {
-      const result = await api(`/campaigns/${campaignId}/send`, { method: 'POST' });
+      const result = await api(`/campaigns/${campaignId}/send`, {
+        method: 'POST',
+        body: JSON.stringify(stepId ? { stepId } : {}),
+      });
       totalSent += result.enqueued || 0;
       totalFailed += result.failed || 0;
       remaining = result.remaining || 0;
       showToast(
         remaining
-          ? `Sent ${totalSent}. ${remaining} left…`
+          ? `Sent ${totalSent}. ${remaining} not sent…`
           : `Finished: ${totalSent} sent${totalFailed ? `, ${totalFailed} bounced` : ''}`
       );
       await loadCampaigns();
@@ -540,9 +556,26 @@ async function sendCampaignBatches(campaignId) {
   }
 }
 
-async function showCampaignAudience(campaignId, name, kind) {
+function closeFollowUpModal() {
+  const modal = document.getElementById('followup-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function openFollowUpModal(campaignId, campaignName, currentStepName) {
+  await loadTemplates();
+  document.getElementById('followup-campaign-id').value = campaignId;
+  document.getElementById('followup-help').textContent =
+    `This stays on “${campaignName}”. ${currentStepName || 'Email 1'} is left as-is. Bounced contacts are skipped.`;
+  document.getElementById('followup-subject').value = '';
+  document.getElementById('followup-modal').hidden = false;
+  document.getElementById('followup-subject').focus();
+}
+
+async function showCampaignAudience(campaignId, name, kind, stepId) {
   const card = document.getElementById('campaign-audience-card');
-  const rows = await api(`/campaigns/${campaignId}/audience?kind=${encodeURIComponent(kind)}`);
+  const params = new URLSearchParams({ kind });
+  if (stepId) params.set('stepId', stepId);
+  const rows = await api(`/campaigns/${campaignId}/audience?${params.toString()}`);
   const label = kind === 'bounced' ? 'Bounced' : kind === 'pending' ? 'Not sent' : 'Sent';
   document.getElementById('campaign-audience-title').textContent = `${label} · ${name} (${rows.length})`;
   document.getElementById('campaign-audience-body').innerHTML = rows.length
@@ -592,14 +625,24 @@ document.addEventListener('click', async (event) => {
         return;
       }
       const resume = sendBtn.textContent.trim() === 'Continue';
-      if (!resume && !confirm('Send this campaign to all eligible recipients now?')) return;
-      await sendCampaignBatches(sendBtn.dataset.send);
+      if (!resume && !confirm('Send this email to eligible people on this campaign now? Bounced contacts are skipped.')) return;
+      await sendCampaignBatches(sendBtn.dataset.send, sendBtn.dataset.step);
+    }
+    const followBtn = event.target.closest('[data-followup]');
+    if (followBtn) {
+      await openFollowUpModal(
+        followBtn.dataset.followup,
+        followBtn.dataset.followupName || 'Campaign',
+        followBtn.dataset.followupStep || 'Email 1'
+      );
+      return;
     }
     if (viewAudience) {
       await showCampaignAudience(
         viewAudience.dataset.viewAudience,
         viewAudience.dataset.audienceName || 'Campaign',
-        viewAudience.dataset.audienceKind || 'sent'
+        viewAudience.dataset.audienceKind || 'sent',
+        viewAudience.dataset.audienceStep
       );
     }
     if (testBtn) {
@@ -887,6 +930,41 @@ document.getElementById('invite-form').addEventListener('submit', async (event) 
   }
 });
 
+document.getElementById('followup-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const campaignId = form.campaignId.value;
+  const submitBtn = form.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    const result = await api(`/campaigns/${campaignId}/follow-up`, {
+      method: 'POST',
+      body: JSON.stringify({
+        subject: form.subject.value.trim(),
+        templateId: form.templateId.value,
+        audience: form.audience.value,
+      }),
+    });
+    closeFollowUpModal();
+    showToast(`${result.step?.name || 'Follow-up'} is ready. Stay on this page to send it.`);
+    await loadCampaigns();
+    const stepId = result.step?.id;
+    if (stepId && confirm(`Send ${result.step.name} now? Stay on this page until it finishes.`)) {
+      await sendCampaignBatches(campaignId, stepId);
+    }
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+
+document.getElementById('followup-cancel')?.addEventListener('click', closeFollowUpModal);
+document.getElementById('followup-cancel-2')?.addEventListener('click', closeFollowUpModal);
+document.getElementById('followup-modal')?.addEventListener('click', (event) => {
+  if (event.target.id === 'followup-modal') closeFollowUpModal();
+});
+
 document.getElementById('password-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -937,7 +1015,10 @@ boot();
 document.getElementById('menu-btn')?.addEventListener('click', toggleMenu);
 document.getElementById('sidebar-backdrop')?.addEventListener('click', closeMenu);
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeMenu();
+  if (event.key === 'Escape') {
+    closeMenu();
+    closeFollowUpModal();
+  }
 });
 
 if ('serviceWorker' in navigator) {

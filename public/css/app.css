@@ -1027,6 +1027,41 @@ tr:last-child td {
   }
 }
 
+.radio-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 14px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 40, 80, 0.35);
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal-card {
+  width: min(520px, 100%);
+  max-height: min(90vh, 720px);
+  overflow: auto;
+}
+
+.step-line {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
 @media (max-width: 420px) {
   .kpis,
   .donuts {

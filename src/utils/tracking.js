@@ -5,8 +5,11 @@ function signPayload(payload) {
   return crypto.createHmac('sha256', env.sessionSecret).update(payload).digest('base64url').slice(0, 16);
 }
 
-export function trackingToken(campaignId, recipientId) {
-  const payload = Buffer.from(`${campaignId}:${recipientId}`, 'utf8').toString('base64url');
+export function trackingToken(campaignId, recipientId, stepId) {
+  const payload = Buffer.from(
+    stepId ? `${campaignId}:${recipientId}:${stepId}` : `${campaignId}:${recipientId}`,
+    'utf8'
+  ).toString('base64url');
   return `${payload}~${signPayload(payload)}`;
 }
 
@@ -21,11 +24,11 @@ export function parseTrackingToken(token) {
     if (!payload || sig !== signPayload(payload)) {
       return null;
     }
-    const [campaignId, recipientId] = Buffer.from(payload, 'base64url').toString('utf8').split(':');
+    const [campaignId, recipientId, stepId] = Buffer.from(payload, 'base64url').toString('utf8').split(':');
     if (!campaignId || !recipientId) {
       return null;
     }
-    return { campaignId, recipientId };
+    return { campaignId, recipientId, stepId: stepId || undefined };
   }
 
   const parts = raw.split('.');
@@ -55,20 +58,20 @@ export function isPrivateAppUrl(url = env.appUrl) {
   }
 }
 
-export function openPixelUrl(campaignId, recipientId) {
-  return `${env.appUrl}/t/o/${trackingToken(campaignId, recipientId)}.gif`;
+export function openPixelUrl(campaignId, recipientId, stepId) {
+  return `${env.appUrl}/t/o/${trackingToken(campaignId, recipientId, stepId)}.gif`;
 }
 
-export function clickUrl(campaignId, recipientId, target) {
-  return `${env.appUrl}/t/c/${trackingToken(campaignId, recipientId)}?u=${encodeURIComponent(target)}`;
+export function clickUrl(campaignId, recipientId, target, stepId) {
+  return `${env.appUrl}/t/c/${trackingToken(campaignId, recipientId, stepId)}?u=${encodeURIComponent(target)}`;
 }
 
-export function withEngagementTracking(html, { campaignId, recipientId, unsubscribeUrl }) {
+export function withEngagementTracking(html, { campaignId, recipientId, stepId, unsubscribeUrl }) {
   if (!campaignId || !recipientId || recipientId === 'test') {
     return html;
   }
 
-  const src = openPixelUrl(campaignId, recipientId);
+  const src = openPixelUrl(campaignId, recipientId, stepId);
   const pixel = `<img src="${src}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0;overflow:hidden" />`;
 
   const tracked = html.replace(/href=["'](https?:\/\/[^"']+)["']/gi, (full, url) => {
@@ -79,7 +82,7 @@ export function withEngagementTracking(html, { campaignId, recipientId, unsubscr
     ) {
       return full;
     }
-    return `href="${clickUrl(campaignId, recipientId, url)}"`;
+    return `href="${clickUrl(campaignId, recipientId, url, stepId)}"`;
   });
 
   if (tracked.includes('/t/o/')) {

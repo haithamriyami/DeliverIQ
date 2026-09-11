@@ -309,6 +309,9 @@
                 <button class="btn btn-danger" type="button" id="remove-bounced-btn">Remove bounced</button>
               </div>
             </div>
+            <p class="muted" style="margin: 0 0 12px">
+              Removing a bounced contact stops DeliverIQ from emailing them again. It cannot cancel a Gmail retry that already started — those “delivery incomplete / 45 more hours” notices have to expire on Gmail’s side.
+            </p>
             <div class="filter-row" id="recipient-filters">
               <button class="btn btn-ghost btn-small is-active" type="button" data-recipient-filter="">All</button>
               <button class="btn btn-ghost btn-small" type="button" data-recipient-filter="active">Active</button>
@@ -391,6 +394,7 @@
                 <div id="gmail-actions" style="margin: 10px 0 16px"></div>
                 <p class="muted" id="sendgrid-status">Checking SendGrid…</p>
                 <p class="muted">No domain needed. Connect Gmail to send as your Google address (free, ~500/day). SendGrid is optional later.</p>
+                <p class="muted">If Gmail says it will retry a bounced address for 45 hours, that retry is inside Gmail. DeliverIQ cannot stop it. Check Gmail bounces, remove those contacts, and they will not get a follow-up from this app.</p>
               </div>
             </article>
             <article class="card settings-card" style="margin-bottom: 16px">
@@ -466,6 +470,35 @@
     </div>
 
     <div class="toast" id="toast" role="status"></div>
+    <div class="modal-backdrop" id="followup-modal" hidden>
+      <article class="card modal-card" role="dialog" aria-labelledby="followup-title">
+        <div class="card-head">
+          <h2 id="followup-title">Send a follow-up</h2>
+          <button class="btn btn-ghost btn-small" type="button" id="followup-cancel">Close</button>
+        </div>
+        <form class="form-grid" id="followup-form">
+          <input type="hidden" name="campaignId" id="followup-campaign-id" />
+          <p class="muted" id="followup-help">This stays on the same campaign. Email 1 is left as-is.</p>
+          <div class="field full">
+            <label for="followup-subject">Subject</label>
+            <input id="followup-subject" name="subject" required placeholder="Quick follow-up" />
+          </div>
+          <div class="field full">
+            <label for="followup-template">Template</label>
+            <select id="followup-template" name="templateId" required></select>
+          </div>
+          <div class="field full">
+            <label>Who should get this email?</label>
+            <label class="radio-row"><input type="radio" name="audience" value="active" checked /> Everyone still on this list (skip bounced and removed)</label>
+            <label class="radio-row"><input type="radio" name="audience" value="delivered" /> Only people who received the last email</label>
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-ghost" type="button" id="followup-cancel-2">Cancel</button>
+            <button class="btn btn-primary" type="submit">Create follow-up</button>
+          </div>
+        </form>
+      </article>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/js/app.js"></script>
   </body>

@@ -38,6 +38,6 @@ export const campaignQueue = {
   },
 };
 
-export function sendJobId(campaignId, recipientId) {
-  return `${campaignId}__${recipientId}`;
+export function sendJobId(campaignId, recipientId, stepId = '') {
+  return stepId ? `${campaignId}__${stepId}__${recipientId}` : `${campaignId}__${recipientId}`;
 }

@@ -22,6 +22,24 @@ const campaignIdSchema = z.object({
   query: z.any().optional(),
 });
 
+const sendSchema = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: z.object({
+    stepId: z.string().uuid().optional(),
+  }).optional(),
+  query: z.any().optional(),
+});
+
+const followUpSchema = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: z.object({
+    subject: z.string().min(1),
+    templateId: z.string().uuid(),
+    audience: z.enum(['active', 'delivered']).optional(),
+  }),
+  query: z.any().optional(),
+});
+
 export const create = [
   validate(createCampaignSchema),
   asyncHandler(async (req, res) => {
@@ -39,11 +57,15 @@ export const list = asyncHandler(async (_req, res) => {
 });
 
 export const send = [
-  validate(campaignIdSchema),
+  validate(sendSchema),
   asyncHandler(async (req, res) => {
-    const result = await campaignService.enqueueCampaign(req.validated.params.id);
+    const result = await campaignService.enqueueCampaign(
+      req.validated.params.id,
+      req.validated.body?.stepId
+    );
     res.json({
       campaignId: result.campaign.id,
+      stepId: result.stepId,
       status: result.campaign.status,
       enqueued: result.enqueued,
       failed: result.failed,
@@ -51,6 +73,17 @@ export const send = [
       skipped: result.skipped,
       errors: result.errors,
     });
+  }),
+];
+
+export const followUp = [
+  validate(followUpSchema),
+  asyncHandler(async (req, res) => {
+    const result = await campaignService.createFollowUp({
+      campaignId: req.validated.params.id,
+      ...req.validated.body,
+    });
+    res.status(201).json(result);
   }),
 ];
 
@@ -89,7 +122,11 @@ export const audience = [
       : req.query.kind === 'pending'
         ? 'pending'
         : 'sent';
-    const rows = await campaignService.listCampaignAudience(req.validated.params.id, kind);
+    const rows = await campaignService.listCampaignAudience(
+      req.validated.params.id,
+      kind,
+      typeof req.query.stepId === 'string' ? req.query.stepId : undefined
+    );
     res.json(rows);
   }),
 ];

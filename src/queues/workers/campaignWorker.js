@@ -9,14 +9,17 @@ export function createCampaignWorker() {
   const worker = new Worker(
     CAMPAIGN_QUEUE_NAME,
     async (job) => {
-      const { campaignId, recipientId } = job.data;
+      const { campaignId, recipientId, stepId } = job.data;
 
-      const [campaign, recipient] = await Promise.all([
+      const [campaign, recipient, step] = await Promise.all([
         prisma.campaign.findUnique({
           where: { id: campaignId },
-          include: { template: true },
+          include: { template: true, steps: { orderBy: { stepNumber: 'asc' } } },
         }),
         prisma.recipient.findUnique({ where: { id: recipientId } }),
+        stepId
+          ? prisma.campaignStep.findUnique({ where: { id: stepId }, include: { template: true } })
+          : Promise.resolve(null),
       ]);
 
       if (!campaign) {
@@ -31,9 +34,14 @@ export function createCampaignWorker() {
         return { skipped: true, reason: 'inactive_recipient' };
       }
 
+      const activeStep = step || campaign.steps[campaign.steps.length - 1];
+      if (!activeStep) {
+        throw new Error(`Campaign ${campaignId} has no email to send`);
+      }
+
       const alreadySent = await prisma.campaignRecipient.findFirst({
         where: {
-          campaignId,
+          stepId: activeStep.id,
           recipientId,
           status: { in: ['sent', 'opened', 'clicked'] },
         },
@@ -47,21 +55,22 @@ export function createCampaignWorker() {
         await sendCampaignEmail({
           to: recipient.email,
           name: recipient.name,
-          subject: campaign.subject,
-          html: campaign.template.body,
+          subject: activeStep.subject,
+          html: (activeStep.template || campaign.template).body,
           campaignId,
           recipientId,
+          stepId: activeStep.id,
           unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
         });
       } catch (err) {
-        await recordBounce({ campaignId, recipientId, error: err.message });
+        await recordBounce({ campaignId, recipientId, stepId: activeStep.id, error: err.message });
         throw err;
       }
 
-      await recordSend({ campaignId, recipientId });
-      await maybeCompleteCampaign(campaignId);
+      await recordSend({ campaignId, recipientId, stepId: activeStep.id });
+      await maybeCompleteCampaign(campaignId, activeStep.id);
 
-      return { skipped: false, recipientId, campaignId };
+      return { skipped: false, recipientId, campaignId, stepId: activeStep.id };
     },
     {
       connection: redisConnection,

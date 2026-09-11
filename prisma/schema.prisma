@@ -102,6 +102,7 @@ model Template {
   createdAt DateTime @default(now()) @map("created_at")
 
   campaigns Campaign[]
+  steps     CampaignStep[]
 
   @@map("templates")
 }
@@ -120,23 +121,47 @@ model Campaign {
 
   template           Template             @relation(fields: [templateId], references: [id])
   createdBy          User?                @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  steps              CampaignStep[]
   campaignRecipients CampaignRecipient[]
 
   @@map("campaigns")
 }
 
+model CampaignStep {
+  id           String         @id @default(uuid())
+  campaignId   String         @map("campaign_id")
+  stepNumber   Int            @map("step_number")
+  name         String
+  subject      String
+  templateId   String         @map("template_id")
+  status       CampaignStatus @default(pending)
+  recipientIds String[]       @default([]) @map("recipient_ids")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  campaign           Campaign             @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  template           Template             @relation(fields: [templateId], references: [id])
+  campaignRecipients CampaignRecipient[]
+
+  @@unique([campaignId, stepNumber])
+  @@index([campaignId])
+  @@map("campaign_steps")
+}
+
 model CampaignRecipient {
   id          String                   @id @default(uuid())
   campaignId  String                   @map("campaign_id")
+  stepId      String                   @map("step_id")
   recipientId String                   @map("recipient_id")
   status      CampaignRecipientStatus
   error       String                   @default("")
   sentAt      DateTime?                @map("sent_at")
 
-  campaign  Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  recipient Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  campaign  Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  step      CampaignStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  recipient Recipient    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
 
-  @@unique([campaignId, recipientId])
+  @@unique([stepId, recipientId])
   @@index([campaignId, status])
+  @@index([stepId, status])
   @@map("campaign_recipients")
 }

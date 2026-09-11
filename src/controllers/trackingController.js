@@ -33,6 +33,7 @@ export const openPixel = asyncHandler(async (req, res) => {
   applyEngagementEvent({
     campaignId: ids.campaignId,
     recipientId: ids.recipientId,
+    stepId: ids.stepId,
     event: 'open',
   }).catch((err) => {
     console.error('[tracking] open failed', err.message);
@@ -48,6 +49,7 @@ export const clickRedirect = asyncHandler(async (req, res) => {
     applyEngagementEvent({
       campaignId: ids.campaignId,
       recipientId: ids.recipientId,
+      stepId: ids.stepId,
       event: 'click',
     }).catch((err) => {
       console.error('[tracking] click failed', err.message);

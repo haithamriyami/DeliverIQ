@@ -12,6 +12,69 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stepNameFor(stepNumber) {
+  return stepNumber <= 1 ? 'Email 1' : `Follow-up ${stepNumber}`;
+}
+
+const campaignInclude = {
+  template: true,
+  createdBy: { select: { id: true, name: true, email: true } },
+  steps: {
+    orderBy: { stepNumber: 'asc' },
+    include: { template: true },
+  },
+};
+
+function audienceIdsFor(campaign, step) {
+  const ids = step?.recipientIds?.length ? step.recipientIds : campaign.recipientIds;
+  return [...new Set(ids)];
+}
+
+async function ensureInitialStep(campaign) {
+  if (campaign.steps?.length) {
+    return campaign.steps[0];
+  }
+
+  const existing = await prisma.campaignStep.findFirst({
+    where: { campaignId: campaign.id, stepNumber: 1 },
+  });
+  if (existing) {
+    return existing;
+  }
+
+  return prisma.campaignStep.create({
+    data: {
+      campaignId: campaign.id,
+      stepNumber: 1,
+      name: 'Email 1',
+      subject: campaign.subject,
+      templateId: campaign.templateId,
+      status: campaign.status,
+      recipientIds: campaign.recipientIds,
+    },
+  });
+}
+
+async function resolveSendStep(campaign, stepId) {
+  await ensureInitialStep(campaign);
+  const steps = await prisma.campaignStep.findMany({
+    where: { campaignId: campaign.id },
+    orderBy: { stepNumber: 'asc' },
+    include: { template: true },
+  });
+  campaign.steps = steps;
+
+  if (stepId) {
+    const match = steps.find((step) => step.id === stepId);
+    if (!match) {
+      throw new HttpError(404, 'Follow-up not found');
+    }
+    return match;
+  }
+
+  return steps[steps.length - 1];
+}
+
 export async function createCampaign({
   name,
   subject,
@@ -49,8 +112,18 @@ export async function createCampaign({
       notes: notes || '',
       createdById: createdById || null,
       status: 'pending',
+      steps: {
+        create: {
+          stepNumber: 1,
+          name: 'Email 1',
+          subject,
+          templateId,
+          status: 'pending',
+          recipientIds: uniqueIds,
+        },
+      },
     },
-    include: { template: true, createdBy: { select: { id: true, name: true, email: true } } },
+    include: campaignInclude,
   });
 }
 
@@ -60,6 +133,10 @@ export async function listCampaigns() {
     include: {
       template: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true, email: true } },
+      steps: {
+        orderBy: { stepNumber: 'asc' },
+        include: { template: { select: { id: true, name: true } } },
+      },
     },
   });
 }
@@ -67,14 +144,18 @@ export async function listCampaigns() {
 export async function getCampaignById(id) {
   const campaign = await prisma.campaign.findUnique({
     where: { id },
-    include: { template: true, createdBy: { select: { id: true, name: true, email: true } } },
+    include: campaignInclude,
   });
 
   if (!campaign) {
     throw new HttpError(404, 'Campaign not found');
   }
 
-  return campaign;
+  await ensureInitialStep(campaign);
+  return prisma.campaign.findUnique({
+    where: { id },
+    include: campaignInclude,
+  });
 }
 
 export async function deleteCampaign(id) {
@@ -103,15 +184,18 @@ export async function deleteCampaign(id) {
   return { ok: true };
 }
 
-export async function enqueueCampaign(campaignId) {
+export async function enqueueCampaign(campaignId, stepId) {
   const campaign = await getCampaignById(campaignId);
+  const step = await resolveSendStep(campaign, stepId);
+  const audienceIds = audienceIdsFor(campaign, step);
+  const template = step.template || campaign.template;
 
   const recipients = await prisma.recipient.findMany({
-    where: { id: { in: campaign.recipientIds } },
+    where: { id: { in: audienceIds } },
   });
 
   const alreadyProcessed = await prisma.campaignRecipient.findMany({
-    where: { campaignId },
+    where: { stepId: step.id },
     select: { recipientId: true },
   });
   const alreadyProcessedIds = new Set(alreadyProcessed.map((row) => row.recipientId));
@@ -119,7 +203,7 @@ export async function enqueueCampaign(campaignId) {
   const skipped = {
     alreadySent: 0,
     inactive: 0,
-    missing: campaign.recipientIds.length - recipients.length,
+    missing: audienceIds.length - recipients.length,
   };
 
   const toSend = [];
@@ -139,9 +223,10 @@ export async function enqueueCampaign(campaignId) {
   }
 
   if (toSend.length === 0) {
-    const completed = await maybeCompleteCampaign(campaignId);
+    const completed = await maybeCompleteCampaign(campaignId, step.id);
     return {
       campaign: completed || campaign,
+      stepId: step.id,
       enqueued: 0,
       failed: 0,
       remaining: 0,
@@ -150,10 +235,16 @@ export async function enqueueCampaign(campaignId) {
     };
   }
 
-  await prisma.campaign.update({
-    where: { id: campaignId },
-    data: { status: 'sending' },
-  });
+  await prisma.$transaction([
+    prisma.campaign.update({
+      where: { id: campaignId },
+      data: { status: 'sending' },
+    }),
+    prisma.campaignStep.update({
+      where: { id: step.id },
+      data: { status: 'sending' },
+    }),
+  ]);
 
   const batch = toSend.slice(0, SEND_BATCH_SIZE);
   let enqueued = 0;
@@ -168,13 +259,14 @@ export async function enqueueCampaign(campaignId) {
       await sendCampaignEmail({
         to: recipient.email,
         name: recipient.name,
-        subject: campaign.subject,
-        html: campaign.template.body,
+        subject: step.subject,
+        html: template.body,
         campaignId: campaign.id,
         recipientId: recipient.id,
+        stepId: step.id,
         unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
       });
-      await recordSend({ campaignId: campaign.id, recipientId: recipient.id });
+      await recordSend({ campaignId: campaign.id, recipientId: recipient.id, stepId: step.id });
       enqueued += 1;
     } catch (err) {
       failed += 1;
@@ -183,17 +275,19 @@ export async function enqueueCampaign(campaignId) {
       await recordBounce({
         campaignId: campaign.id,
         recipientId: recipient.id,
+        stepId: step.id,
         error: err.message,
       });
     }
   }
 
-  await maybeCompleteCampaign(campaignId);
+  await maybeCompleteCampaign(campaignId, step.id);
   const updated = await getCampaignById(campaignId);
   const remaining = Math.max(0, toSend.length - batch.length);
 
   return {
     campaign: updated,
+    stepId: step.id,
     enqueued,
     failed,
     remaining,
@@ -202,43 +296,119 @@ export async function enqueueCampaign(campaignId) {
   };
 }
 
-export async function maybeCompleteCampaign(campaignId) {
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
+export async function createFollowUp({ campaignId, subject, templateId, audience = 'active' }) {
+  const campaign = await getCampaignById(campaignId);
+  const template = await prisma.template.findUnique({ where: { id: templateId } });
+  if (!template) {
+    throw new HttpError(404, 'Template not found');
+  }
+
+  try {
+    await syncBouncesFromGmail();
+  } catch {
+    // Gmail read may need reconnect; still allow creating the follow-up.
+  }
+
+  const last = campaign.steps[campaign.steps.length - 1];
+  if (!last) {
+    throw new HttpError(400, 'This campaign has no first email yet.');
+  }
+  const livePeople = await prisma.recipient.findMany({
+    where: { id: { in: campaign.recipientIds } },
+  });
+  const activePeople = livePeople.filter((person) => person.status === 'active');
+
+  let recipientIds;
+  if (audience === 'delivered') {
+    const delivered = await prisma.campaignRecipient.findMany({
+      where: {
+        stepId: last.id,
+        status: { in: ['sent', 'opened', 'clicked'] },
+      },
+      select: { recipientId: true },
+    });
+    const deliveredIds = new Set(delivered.map((row) => row.recipientId));
+    recipientIds = activePeople.filter((person) => deliveredIds.has(person.id)).map((person) => person.id);
+  } else {
+    recipientIds = activePeople.map((person) => person.id);
+  }
+
+  if (recipientIds.length === 0) {
+    throw new HttpError(
+      400,
+      'Nobody left for this follow-up. Bounced, delayed, and removed contacts are skipped.'
+    );
+  }
+
+  const stepNumber = last.stepNumber + 1;
+  const step = await prisma.campaignStep.create({
+    data: {
+      campaignId: campaign.id,
+      stepNumber,
+      name: stepNameFor(stepNumber),
+      subject,
+      templateId,
+      status: 'pending',
+      recipientIds,
+    },
+    include: { template: true },
   });
 
-  if (!campaign || campaign.status === 'completed') {
+  await prisma.campaign.update({
+    where: { id: campaign.id },
+    data: {
+      subject,
+      templateId,
+      status: 'pending',
+    },
+  });
+
+  return getCampaignById(campaign.id).then((updated) => ({ campaign: updated, step }));
+}
+
+export async function maybeCompleteCampaign(campaignId, stepId) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: { steps: { orderBy: { stepNumber: 'asc' } } },
+  });
+
+  if (!campaign) {
     return campaign;
   }
 
-  const sentRecords = await prisma.campaignRecipient.findMany({
-    where: { campaignId },
-    select: { recipientId: true },
-  });
-  const processedIds = new Set(sentRecords.map((row) => row.recipientId));
+  const steps = campaign.steps.length ? campaign.steps : [await ensureInitialStep(campaign)];
+  const targetSteps = stepId ? steps.filter((step) => step.id === stepId) : steps;
 
-  const existing = await prisma.recipient.findMany({
-    where: { id: { in: campaign.recipientIds } },
-    select: { id: true, status: true },
-  });
-  const liveIds = existing.map((row) => row.id);
-  if (liveIds.length !== campaign.recipientIds.length) {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
-      data: { recipientIds: liveIds },
-    });
+  for (const step of targetSteps) {
+    const pending = await livePendingCount(campaign, step);
+    if (pending === 0 && step.status !== 'completed') {
+      await prisma.campaignStep.update({
+        where: { id: step.id },
+        data: { status: 'completed' },
+      });
+      step.status = 'completed';
+    }
   }
 
-  const remaining = existing.filter((row) => row.status === 'active' && !processedIds.has(row.id));
+  const refreshed = await prisma.campaignStep.findMany({
+    where: { campaignId },
+    orderBy: { stepNumber: 'asc' },
+  });
+  const latest = refreshed[refreshed.length - 1];
+  const nextStatus = latest?.status || campaign.status;
 
-  if (remaining.length === 0) {
+  if (campaign.status !== nextStatus) {
     return prisma.campaign.update({
       where: { id: campaignId },
-      data: { status: 'completed' },
+      data: { status: nextStatus },
+      include: campaignInclude,
     });
   }
 
-  return campaign;
+  return prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: campaignInclude,
+  });
 }
 
 export async function getCampaignReport(campaignId) {
@@ -256,9 +426,10 @@ export async function getCampaignReport(campaignId) {
   }
 
   const delivered = counts.sent + counts.opened + counts.clicked;
-  const livePending = await livePendingCount(campaign);
+  const currentStep = await resolveSendStep(campaign);
+  const livePending = await livePendingCount(campaign, currentStep);
   const funnel = funnelFromCounts(counts, {
-    audienceSize: campaign.recipientIds.length,
+    audienceSize: audienceIdsFor(campaign, currentStep).length,
     pending: livePending,
   });
   const opened = counts.opened + counts.clicked;
@@ -292,10 +463,21 @@ const STATUS_RANK = {
   bounced: 4,
 };
 
-export async function recordSend({ campaignId, recipientId }) {
+export async function recordSend({ campaignId, recipientId, stepId }) {
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: { steps: { orderBy: { stepNumber: 'asc' } } },
+  });
+  const step = stepId
+    ? campaign?.steps.find((item) => item.id === stepId)
+    : campaign?.steps[campaign.steps.length - 1];
+  if (!step) {
+    throw new HttpError(404, 'Follow-up not found');
+  }
+
   const existing = await prisma.campaignRecipient.findUnique({
     where: {
-      campaignId_recipientId: { campaignId, recipientId },
+      stepId_recipientId: { stepId: step.id, recipientId },
     },
   });
 
@@ -303,6 +485,7 @@ export async function recordSend({ campaignId, recipientId }) {
     return prisma.campaignRecipient.create({
       data: {
         campaignId,
+        stepId: step.id,
         recipientId,
         status: 'sent',
         sentAt: new Date(),
@@ -322,7 +505,7 @@ export async function recordSend({ campaignId, recipientId }) {
   });
 }
 
-export async function recordBounce({ campaignId, recipientId, error }) {
+export async function recordBounce({ campaignId, recipientId, error, stepId }) {
   const reason = String(error || 'Bounced').slice(0, 500);
 
   await prisma.recipient.update({
@@ -330,45 +513,63 @@ export async function recordBounce({ campaignId, recipientId, error }) {
     data: { status: 'bounced', lastError: reason },
   });
 
-  const existing = await prisma.campaignRecipient.findUnique({
+  const rows = await prisma.campaignRecipient.findMany({
     where: {
-      campaignId_recipientId: { campaignId, recipientId },
+      recipientId,
+      ...(campaignId ? { campaignId } : {}),
+      ...(stepId ? { stepId } : {}),
     },
   });
 
-  if (!existing) {
-    return prisma.campaignRecipient.create({
+  if (rows.length === 0 && campaignId) {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      include: { steps: { orderBy: { stepNumber: 'asc' } } },
+    });
+    const step = stepId
+      ? campaign?.steps.find((item) => item.id === stepId)
+      : campaign?.steps[campaign.steps.length - 1];
+    if (step) {
+      return prisma.campaignRecipient.create({
+        data: {
+          campaignId,
+          stepId: step.id,
+          recipientId,
+          status: 'bounced',
+          error: reason,
+          sentAt: new Date(),
+        },
+      });
+    }
+  }
+
+  let last = null;
+  for (const row of rows) {
+    last = await prisma.campaignRecipient.update({
+      where: { id: row.id },
       data: {
-        campaignId,
-        recipientId,
         status: 'bounced',
         error: reason,
-        sentAt: new Date(),
       },
     });
   }
-
-  return prisma.campaignRecipient.update({
-    where: { id: existing.id },
-    data: {
-      status: 'bounced',
-      error: reason,
-    },
-  });
+  return last;
 }
 
-export async function listCampaignAudience(campaignId, kind = 'sent') {
+export async function listCampaignAudience(campaignId, kind = 'sent', stepId) {
   const campaign = await getCampaignById(campaignId);
+  const step = await resolveSendStep(campaign, stepId);
+  const audienceIds = audienceIdsFor(campaign, step);
 
   if (kind === 'pending') {
     const processed = await prisma.campaignRecipient.findMany({
-      where: { campaignId },
+      where: { stepId: step.id },
       select: { recipientId: true },
     });
     const processedIds = new Set(processed.map((row) => row.recipientId));
     const people = await prisma.recipient.findMany({
       where: {
-        id: { in: campaign.recipientIds },
+        id: { in: audienceIds },
         status: 'active',
       },
       orderBy: { email: 'asc' },
@@ -390,8 +591,8 @@ export async function listCampaignAudience(campaignId, kind = 'sent') {
 
   const where =
     kind === 'bounced'
-      ? { campaignId, status: 'bounced' }
-      : { campaignId, status: { in: ['sent', 'opened', 'clicked'] } };
+      ? { stepId: step.id, status: 'bounced' }
+      : { stepId: step.id, status: { in: ['sent', 'opened', 'clicked'] } };
 
   return prisma.campaignRecipient.findMany({
     where,
@@ -424,7 +625,9 @@ export async function syncBouncesFromGmail() {
       where: { id: recipient.id },
       data: {
         status: 'bounced',
-        lastError: recipient.lastError || 'Gmail reported this address as undeliverable.',
+        lastError:
+          recipient.lastError ||
+          'Gmail reported this address as undeliverable or delayed.',
       },
     });
 
@@ -436,7 +639,7 @@ export async function syncBouncesFromGmail() {
       await recordBounce({
         campaignId: row.campaignId,
         recipientId: recipient.id,
-        error: row.error || 'Gmail reported this address as undeliverable.',
+        error: row.error || 'Gmail reported this address as undeliverable or delayed.',
       });
     }
 
@@ -446,7 +649,7 @@ export async function syncBouncesFromGmail() {
   return { scanned: addresses.length, marked: emails.length, emails };
 }
 
-export async function applyEngagementEvent({ campaignId, recipientId, event }) {
+export async function applyEngagementEvent({ campaignId, recipientId, event, stepId }) {
   const statusMap = {
     bounce: 'bounced',
     dropped: 'bounced',
@@ -459,16 +662,30 @@ export async function applyEngagementEvent({ campaignId, recipientId, event }) {
     return null;
   }
 
-  const existing = await prisma.campaignRecipient.findUnique({
-    where: {
-      campaignId_recipientId: { campaignId, recipientId },
-    },
-  });
+  const existing = stepId
+    ? await prisma.campaignRecipient.findUnique({
+        where: { stepId_recipientId: { stepId, recipientId } },
+      })
+    : await prisma.campaignRecipient.findFirst({
+        where: { campaignId, recipientId },
+        orderBy: { sentAt: 'desc' },
+      });
 
   if (!existing) {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      include: { steps: { orderBy: { stepNumber: 'asc' } } },
+    });
+    const step = stepId
+      ? campaign?.steps.find((item) => item.id === stepId)
+      : campaign?.steps[campaign.steps.length - 1];
+    if (!step) {
+      return null;
+    }
     return prisma.campaignRecipient.create({
       data: {
         campaignId,
+        stepId: step.id,
         recipientId,
         status: nextStatus,
         sentAt: nextStatus === 'sent' ? new Date() : undefined,
@@ -514,41 +731,53 @@ export async function listCampaignsWithStats() {
   }
 
   const campaignIds = campaigns.map((campaign) => campaign.id);
+  const allAudienceIds = [...new Set(campaigns.flatMap((campaign) => [
+    ...campaign.recipientIds,
+    ...campaign.steps.flatMap((step) => step.recipientIds),
+  ]))];
   const [grouped, rows, people] = await Promise.all([
     prisma.campaignRecipient.groupBy({
-      by: ['campaignId', 'status'],
+      by: ['stepId', 'status'],
       _count: { _all: true },
     }),
     prisma.campaignRecipient.findMany({
       where: { campaignId: { in: campaignIds } },
-      select: { campaignId: true, recipientId: true },
+      select: { campaignId: true, stepId: true, recipientId: true },
     }),
     prisma.recipient.findMany({
-      where: { id: { in: [...new Set(campaigns.flatMap((campaign) => campaign.recipientIds))] } },
+      where: { id: { in: allAudienceIds } },
       select: { id: true, status: true },
     }),
   ]);
 
-  const byCampaign = new Map();
+  const byStep = new Map();
   for (const row of grouped) {
-    if (!byCampaign.has(row.campaignId)) {
-      byCampaign.set(row.campaignId, emptyCounts());
+    if (!byStep.has(row.stepId)) {
+      byStep.set(row.stepId, emptyCounts());
     }
-    byCampaign.get(row.campaignId)[row.status] = row._count._all;
+    byStep.get(row.stepId)[row.status] = row._count._all;
   }
 
-  const processedByCampaign = new Map();
+  const processedByStep = new Map();
   for (const row of rows) {
-    if (!processedByCampaign.has(row.campaignId)) {
-      processedByCampaign.set(row.campaignId, new Set());
+    if (!processedByStep.has(row.stepId)) {
+      processedByStep.set(row.stepId, new Set());
     }
-    processedByCampaign.get(row.campaignId).add(row.recipientId);
+    processedByStep.get(row.stepId).add(row.recipientId);
   }
 
   const peopleById = new Map(people.map((person) => [person.id, person]));
 
   const reconciled = await Promise.all(
     campaigns.map(async (campaign) => {
+      if (!campaign.steps.length) {
+        await ensureInitialStep(campaign);
+        campaign.steps = await prisma.campaignStep.findMany({
+          where: { campaignId: campaign.id },
+          orderBy: { stepNumber: 'asc' },
+        });
+      }
+
       const liveIds = campaign.recipientIds.filter((id) => peopleById.has(id));
       if (liveIds.length !== campaign.recipientIds.length) {
         await prisma.campaign.update({
@@ -558,38 +787,67 @@ export async function listCampaignsWithStats() {
         campaign.recipientIds = liveIds;
       }
 
-      const processed = processedByCampaign.get(campaign.id) || new Set();
-      const pending = liveIds.filter((id) => {
-        const person = peopleById.get(id);
-        return person?.status === 'active' && !processed.has(id);
-      }).length;
+      const stepSummaries = [];
+      for (const step of campaign.steps) {
+        const audience = audienceIdsFor(campaign, step).filter((id) => peopleById.has(id));
+        const processed = processedByStep.get(step.id) || new Set();
+        const pending = audience.filter((id) => {
+          const person = peopleById.get(id);
+          return person?.status === 'active' && !processed.has(id);
+        }).length;
 
-      if (pending === 0 && campaign.status === 'sending') {
-        await prisma.campaign.update({
-          where: { id: campaign.id },
-          data: { status: 'completed' },
+        if (pending === 0 && step.status === 'sending') {
+          await prisma.campaignStep.update({
+            where: { id: step.id },
+            data: { status: 'completed' },
+          });
+          step.status = 'completed';
+        }
+
+        const totals = funnelFromCounts(byStep.get(step.id) || emptyCounts(), {
+          audienceSize: audience.length,
+          pending,
         });
-        campaign.status = 'completed';
+        stepSummaries.push({
+          id: step.id,
+          name: step.name,
+          stepNumber: step.stepNumber,
+          subject: step.subject,
+          status: step.status,
+          totals: {
+            sent: totals.sent,
+            bounced: totals.bounced,
+            opened: totals.opened,
+            clicked: totals.clicked,
+            pending: totals.pending,
+          },
+        });
       }
 
-      const totals = funnelFromCounts(byCampaign.get(campaign.id) || emptyCounts(), {
-        audienceSize: liveIds.length,
-        pending,
-      });
+      const currentStep = stepSummaries[stepSummaries.length - 1];
+      if (currentStep && campaign.status !== currentStep.status) {
+        await prisma.campaign.update({
+          where: { id: campaign.id },
+          data: { status: currentStep.status },
+        });
+        campaign.status = currentStep.status;
+      }
+
       return {
         ...campaign,
-        totals: {
-          sent: totals.sent,
-          bounced: totals.bounced,
-          opened: totals.opened,
-          clicked: totals.clicked,
-          pending: totals.pending,
+        currentStep,
+        steps: stepSummaries,
+        totals: currentStep?.totals || {
+          sent: 0,
+          bounced: 0,
+          opened: 0,
+          clicked: 0,
+          pending: 0,
         },
-        rates: {
-          bounceRate: totals.bounceRate,
-          openRate: totals.openRate,
-          clickRate: totals.clickRate,
-        },
+        rates: funnelFromCounts(byStep.get(currentStep?.id) || emptyCounts(), {
+          audienceSize: audienceIdsFor(campaign, campaign.steps[campaign.steps.length - 1]).length,
+          pending: currentStep?.totals.pending || 0,
+        }),
       };
     })
   );
@@ -597,26 +855,19 @@ export async function listCampaignsWithStats() {
   return reconciled;
 }
 
-async function livePendingCount(campaign) {
+async function livePendingCount(campaign, step) {
+  const audienceIds = audienceIdsFor(campaign, step);
   const [existing, processed] = await Promise.all([
     prisma.recipient.findMany({
-      where: { id: { in: campaign.recipientIds } },
+      where: { id: { in: audienceIds } },
       select: { id: true, status: true },
     }),
     prisma.campaignRecipient.findMany({
-      where: { campaignId: campaign.id },
+      where: { stepId: step.id },
       select: { recipientId: true },
     }),
   ]);
   const processedIds = new Set(processed.map((row) => row.recipientId));
-  const liveIds = existing.map((row) => row.id);
-  if (liveIds.length !== campaign.recipientIds.length) {
-    await prisma.campaign.update({
-      where: { id: campaign.id },
-      data: { recipientIds: liveIds },
-    });
-    campaign.recipientIds = liveIds;
-  }
   return existing.filter((row) => row.status === 'active' && !processedIds.has(row.id)).length;
 }
 
@@ -678,13 +929,17 @@ export async function sendTestEmail({ campaignId, to }) {
     throw new HttpError(400, 'Test email address is required');
   }
 
+  const step = await resolveSendStep(campaign);
+  const template = step.template || campaign.template;
+
   return sendCampaignEmail({
     to,
     name: 'there',
-    subject: `[Test] ${campaign.subject}`,
-    html: campaign.template.body,
+    subject: `[Test] ${step.subject}`,
+    html: template.body,
     campaignId: campaign.id,
     recipientId: 'test',
+    stepId: step.id,
     unsubscribeUrl: `${env.appUrl}/unsubscribe.html`,
   });
 }

@@ -37,6 +37,7 @@ export async function sendCampaignEmail({
   html,
   campaignId,
   recipientId,
+  stepId,
   unsubscribeUrl,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to });
@@ -45,7 +46,7 @@ export async function sendCampaignEmail({
       interpolate(html, { name, email: to, unsubscribeUrl: unsubscribeUrl || '' }),
       unsubscribeUrl
     ),
-    { campaignId, recipientId, unsubscribeUrl }
+    { campaignId, recipientId, stepId, unsubscribeUrl }
   );
 
   const message = {

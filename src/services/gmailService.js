@@ -216,7 +216,10 @@ export async function listGmailBounceAddresses() {
         '(from:mailer-daemon OR from:mailer-daemon@googlemail.com',
         'OR subject:"Delivery Status Notification"',
         'OR subject:Undeliverable OR subject:"Mail Delivery Subsystem"',
-        'OR subject:"returned to sender")',
+        'OR subject:"returned to sender"',
+        'OR subject:"Delivery incomplete"',
+        'OR "temporary problem delivering"',
+        'OR "will try for")',
       ].join(' '),
     });
   } catch (err) {
