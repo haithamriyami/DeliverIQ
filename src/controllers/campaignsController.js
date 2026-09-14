@@ -11,6 +11,7 @@ const createCampaignSchema = z.object({
     scheduledAt: z.coerce.date(),
     recipientIds: z.array(z.string().uuid()).min(1),
     notes: z.string().optional(),
+    listId: z.string().uuid().optional(),
   }),
   params: z.any().optional(),
   query: z.any().optional(),

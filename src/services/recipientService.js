@@ -2,13 +2,20 @@ import { parse } from 'csv-parse/sync';
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../middleware/errorHandler.js';
 
-export async function createRecipient({ email, name, timezone, notes }) {
+export async function createRecipient({ email, name, timezone, notes, listId }) {
+  const list = await getContactListById(listId);
   const existing = await prisma.recipient.findUnique({
     where: { email: email.toLowerCase() },
+    include: { list: { select: { id: true, name: true } } },
   });
 
   if (existing) {
-    throw new HttpError(409, 'Recipient already exists', { email: existing.email });
+    throw new HttpError(
+      409,
+      existing.listId === list.id
+        ? 'Recipient already exists on this list'
+        : `That email is already on ${existing.list?.name || 'another list'}`
+    );
   }
 
   return prisma.recipient.create({
@@ -17,14 +24,19 @@ export async function createRecipient({ email, name, timezone, notes }) {
       name,
       timezone: timezone || 'UTC',
       notes: notes || '',
+      listId: list.id,
     },
+    include: { list: { select: { id: true, name: true } } },
   });
 }
 
-export async function listRecipients(status, q) {
+export async function listRecipients(status, q, listId) {
   const where = {};
   if (status) {
     where.status = status;
+  }
+  if (listId) {
+    where.listId = listId;
   }
   const query = String(q || '').trim();
   if (query) {
@@ -37,6 +49,7 @@ export async function listRecipients(status, q) {
   return prisma.recipient.findMany({
     where: Object.keys(where).length ? where : undefined,
     orderBy: { createdAt: 'desc' },
+    include: { list: { select: { id: true, name: true } } },
   }).then(async (recipients) => {
     const assignments = await campaignAssignmentsForRecipients(recipients.map((row) => row.id));
     return recipients.map((row) => ({
@@ -95,9 +108,74 @@ export async function campaignAssignmentsForRecipients(recipientIds) {
   return map;
 }
 
-export async function deleteBouncedRecipients() {
+export async function getContactListById(id) {
+  if (!id) {
+    throw new HttpError(400, 'Pick a list first, such as Agencies or Restaurants');
+  }
+  const list = await prisma.contactList.findUnique({ where: { id } });
+  if (!list) {
+    throw new HttpError(404, 'List not found');
+  }
+  return list;
+}
+
+export async function ensureDefaultLists() {
+  const existing = await prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
+  if (existing.length) {
+    return existing;
+  }
+
+  await prisma.contactList.createMany({
+    data: [{ name: 'Agencies' }, { name: 'Restaurants' }],
+  });
+  return prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
+}
+
+export async function listContactLists() {
+  const lists = await ensureDefaultLists();
+  const grouped = await prisma.recipient.groupBy({
+    by: ['listId'],
+    _count: { _all: true },
+  });
+  const counts = new Map(grouped.map((row) => [row.listId, row._count._all]));
+  return lists.map((list) => ({
+    ...list,
+    recipientCount: counts.get(list.id) || 0,
+  }));
+}
+
+export async function createContactList(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    throw new HttpError(400, 'List name is required');
+  }
+
+  const clash = await prisma.contactList.findFirst({
+    where: { name: { equals: trimmed, mode: 'insensitive' } },
+  });
+  if (clash) {
+    throw new HttpError(409, `A list named ${clash.name} already exists`);
+  }
+
+  return prisma.contactList.create({ data: { name: trimmed } });
+}
+
+export async function moveRecipient(id, listId) {
+  await getRecipientById(id);
+  const list = await getContactListById(listId);
+  return prisma.recipient.update({
+    where: { id },
+    data: { listId: list.id },
+    include: { list: { select: { id: true, name: true } } },
+  });
+}
+
+export async function deleteBouncedRecipients(listId) {
   const result = await prisma.recipient.deleteMany({
-    where: { status: 'bounced' },
+    where: {
+      status: 'bounced',
+      ...(listId ? { listId } : {}),
+    },
   });
   return { deleted: result.count };
 }
@@ -176,7 +254,8 @@ function headerMap(headers) {
   return map;
 }
 
-export async function importRecipientsFromCsv(csvText) {
+export async function importRecipientsFromCsv(csvText, listId) {
+  const list = await getContactListById(listId);
   let records;
   try {
     records = parse(csvText, {
@@ -208,6 +287,8 @@ export async function importRecipientsFromCsv(csvText) {
     skippedInvalid: 0,
     skippedBounced: 0,
     skippedUnsubscribed: 0,
+    skippedOtherList: 0,
+    otherListName: '',
   };
 
   for (const row of records.slice(1)) {
@@ -221,7 +302,10 @@ export async function importRecipientsFromCsv(csvText) {
     const timezone = tzIndex != null ? String(row[tzIndex] || '').trim() : '';
     const notes = notesIndex != null ? String(row[notesIndex] || '').trim() : '';
 
-    const existing = await prisma.recipient.findUnique({ where: { email } });
+    const existing = await prisma.recipient.findUnique({
+      where: { email },
+      include: { list: { select: { name: true } } },
+    });
 
     if (!existing) {
       await prisma.recipient.create({
@@ -230,9 +314,16 @@ export async function importRecipientsFromCsv(csvText) {
           name: name || email.split('@')[0],
           timezone: timezone || 'UTC',
           notes: notes || '',
+          listId: list.id,
         },
       });
       summary.created += 1;
+      continue;
+    }
+
+    if (existing.listId !== list.id) {
+      summary.skippedOtherList += 1;
+      summary.otherListName = existing.list?.name || 'another list';
       continue;
     }
 

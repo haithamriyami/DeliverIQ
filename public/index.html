@@ -310,8 +310,12 @@
               </div>
             </div>
             <p class="muted" style="margin: 0 0 12px">
-              Removing a bounced contact stops DeliverIQ from emailing them again. It cannot cancel a Gmail retry that already started — those “delivery incomplete / 45 more hours” notices have to expire on Gmail’s side.
+              Keep sectors in separate lists so Agencies never mix with Restaurants. Import and add contacts into the list you have selected. Removing a bounced contact stops DeliverIQ from emailing them again. It cannot cancel a Gmail retry that already started.
             </p>
+            <div class="filter-row" id="contact-list-row">
+              <div class="list-chips" id="contact-lists"></div>
+              <button class="btn btn-ghost btn-small" type="button" id="new-list-btn">+ New list</button>
+            </div>
             <div class="filter-row" id="recipient-filters">
               <button class="btn btn-ghost btn-small is-active" type="button" data-recipient-filter="">All</button>
               <button class="btn btn-ghost btn-small" type="button" data-recipient-filter="active">Active</button>
@@ -367,6 +371,7 @@
                     <tr>
                       <th>Name</th>
                       <th>Email</th>
+                      <th>List</th>
                       <th>Campaign</th>
                       <th>Timezone</th>
                       <th>Notes</th>
@@ -447,12 +452,16 @@
                   <select id="c-template" name="templateId" required></select>
                 </div>
                 <div class="field">
+                  <label for="c-list">Contact list</label>
+                  <select id="c-list" name="listId" required></select>
+                </div>
+                <div class="field">
                   <label for="c-when">Scheduled at</label>
                   <input id="c-when" name="scheduledAt" type="datetime-local" required />
                 </div>
                 <div class="field full">
                   <label>Recipients</label>
-                  <p class="muted" style="margin: 0 0 8px">People already on another campaign are locked so they cannot be emailed twice. Import new forms first, then only the free contacts can be checked.</p>
+                  <p class="muted" style="margin: 0 0 8px">Only contacts from the list above are shown. People already on another campaign are locked so they cannot be emailed twice.</p>
                   <input id="c-recipient-search" type="search" placeholder="Search recipients to select" />
                   <p class="muted" id="c-recipient-summary" style="margin: 8px 0 0"></p>
                   <div class="check-list" id="c-recipients"></div>

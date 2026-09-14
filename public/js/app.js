@@ -15,6 +15,9 @@ let inviteToken = null;
 let setupRequired = true;
 let recipientFilter = '';
 let recipientSearch = '';
+let recipientListId = '';
+let campaignListId = '';
+let contactLists = [];
 let sendingCampaignId = null;
 let pickerRecipients = [];
 
@@ -215,8 +218,9 @@ function campaignRow(campaign, { actions = false } = {}) {
         <button class="btn btn-danger btn-small" data-delete-campaign="${campaign.id}">Delete</button>
       </td>`
     : '';
+  const listName = campaign.list?.name ? `<span class="muted step-line">${escapeHtml(campaign.list.name)}</span>` : '';
   return `<tr>
-    <td>${escapeHtml(campaign.name)}${stepLine ? `<span class="muted step-line">${stepLine}</span>` : ''}</td>
+    <td>${escapeHtml(campaign.name)}${listName}${stepLine ? `<span class="muted step-line">${stepLine}</span>` : ''}</td>
     <td>${statusBadge(status, totals.pending || 0)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent · ${escapeHtml(stepLabel)}</span>` : ` <span class="muted">${escapeHtml(stepLabel)}</span>`}</td>
     <td>${empty ? '—' : fmtNum(totals.sent)}</td>
     <td>${empty ? '—' : fmtNum(totals.bounced)}</td>
@@ -363,18 +367,67 @@ async function loadCampaigns() {
     : '<p class="empty">No reports yet</p>';
 }
 
+async function loadContactLists() {
+  contactLists = await api('/recipients/lists');
+  if (!recipientListId || !contactLists.some((list) => list.id === recipientListId)) {
+    const agencies = contactLists.find((list) => list.name.toLowerCase() === 'agencies');
+    recipientListId = agencies?.id || contactLists[0]?.id || '';
+  }
+  if (!campaignListId || !contactLists.some((list) => list.id === campaignListId)) {
+    campaignListId = recipientListId;
+  }
+  renderContactListChips();
+  const campaignSelect = document.getElementById('c-list');
+  if (campaignSelect) {
+    campaignSelect.innerHTML = contactLists
+      .map(
+        (list) =>
+          `<option value="${list.id}"${list.id === campaignListId ? ' selected' : ''}>${escapeHtml(list.name)} (${fmtNum(list.recipientCount)})</option>`
+      )
+      .join('');
+  }
+}
+
+function renderContactListChips() {
+  const host = document.getElementById('contact-lists');
+  if (!host) return;
+  host.innerHTML = contactLists
+    .map(
+      (list) =>
+        `<button class="btn btn-ghost btn-small${list.id === recipientListId ? ' is-active' : ''}" type="button" data-contact-list="${list.id}">${escapeHtml(list.name)} (${fmtNum(list.recipientCount)})</button>`
+    )
+    .join('');
+}
+
+function listOptionsHtml(selectedId) {
+  return contactLists
+    .map(
+      (list) =>
+        `<option value="${list.id}"${list.id === selectedId ? ' selected' : ''}>${escapeHtml(list.name)}</option>`
+    )
+    .join('');
+}
+
 async function loadRecipients() {
+  await loadContactLists();
   const params = new URLSearchParams();
   if (recipientFilter) params.set('status', recipientFilter);
   if (recipientSearch) params.set('q', recipientSearch);
+  if (recipientListId) params.set('listId', recipientListId);
   const query = params.toString();
   const recipients = await api(query ? `/recipients?${query}` : '/recipients');
+  const selectedName = contactLists.find((list) => list.id === recipientListId)?.name || 'this list';
   document.getElementById('recipients-body').innerHTML = recipients.length
     ? recipients
         .map(
           (r) => `<tr>
             <td>${escapeHtml(r.name)}</td>
             <td>${escapeHtml(r.email)}</td>
+            <td>
+              <select class="list-option" data-move-list="${r.id}">
+                ${listOptionsHtml(r.listId || r.list?.id || recipientListId)}
+              </select>
+            </td>
             <td>${escapeHtml((r.inCampaigns || []).map((c) => c.name).join(', ') || 'Not in a campaign')}</td>
             <td>${escapeHtml(r.timezone)}</td>
             <td>${escapeHtml(r.notes || '—')}</td>
@@ -386,9 +439,11 @@ async function loadRecipients() {
           </tr>`
         )
         .join('')
-    : '<tr><td colspan="8" class="empty">No recipients match that search</td></tr>';
+    : `<tr><td colspan="9" class="empty">No contacts in ${escapeHtml(selectedName)} yet</td></tr>`;
 
-  pickerRecipients = await api('/recipients?status=active');
+  const pickerParams = new URLSearchParams({ status: 'active' });
+  if (campaignListId) pickerParams.set('listId', campaignListId);
+  pickerRecipients = await api(`/recipients?${pickerParams.toString()}`);
   renderRecipientPicker(document.getElementById('c-recipient-search')?.value || '');
 }
 
@@ -400,7 +455,8 @@ function renderRecipientPicker(query) {
     [...box.querySelectorAll('input[name="recipientIds"]:checked:not(:disabled)')].map((el) => el.value)
   );
   const needle = String(query || '').trim().toLowerCase();
-  const list = pickerRecipients.filter(
+  const scoped = pickerRecipients.filter((r) => !campaignListId || r.listId === campaignListId || r.list?.id === campaignListId);
+  const list = scoped.filter(
     (r) =>
       !needle ||
       r.name.toLowerCase().includes(needle) ||
@@ -408,12 +464,13 @@ function renderRecipientPicker(query) {
       String(r.notes || '').toLowerCase().includes(needle) ||
       (r.inCampaigns || []).some((c) => c.name.toLowerCase().includes(needle))
   );
-  const takenCount = pickerRecipients.filter((r) => (r.inCampaigns || []).length).length;
-  const freeCount = pickerRecipients.length - takenCount;
+  const takenCount = scoped.filter((r) => (r.inCampaigns || []).length).length;
+  const freeCount = scoped.length - takenCount;
+  const listName = contactLists.find((item) => item.id === campaignListId)?.name || 'this list';
   if (summary) {
-    summary.textContent = pickerRecipients.length
-      ? `${fmtNum(freeCount)} available to pick · ${fmtNum(takenCount)} already in a campaign`
-      : '';
+    summary.textContent = scoped.length
+      ? `${listName}: ${fmtNum(freeCount)} available to pick · ${fmtNum(takenCount)} already in a campaign`
+      : `No contacts in ${listName} yet. Import them on Recipients first.`;
   }
   box.innerHTML = list.length
     ? list
@@ -427,7 +484,7 @@ function renderRecipientPicker(query) {
           return `<label><input type="checkbox" name="recipientIds" value="${r.id}"${checked} /> ${escapeHtml(r.name)} · ${escapeHtml(r.email)}</label>`;
         })
         .join('')
-    : '<p class="muted">No recipients match that search</p>';
+    : `<p class="muted">No ${escapeHtml(listName)} contacts match that search</p>`;
 }
 
 async function loadTemplates() {
@@ -797,6 +854,7 @@ document.getElementById('campaign-form').addEventListener('submit', async (event
         scheduledAt: new Date(form.scheduledAt.value).toISOString(),
         recipientIds,
         notes: form.notes.value.trim(),
+        listId: form.listId.value,
       }),
     });
     showToast('Campaign created');
@@ -826,6 +884,10 @@ document.getElementById('template-form').addEventListener('submit', async (event
 document.getElementById('recipient-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
+  if (!recipientListId) {
+    showToast('Pick a list first, such as Agencies or Restaurants');
+    return;
+  }
   try {
     await api('/recipients', {
       method: 'POST',
@@ -834,6 +896,7 @@ document.getElementById('recipient-form').addEventListener('submit', async (even
         email: form.email.value.trim(),
         timezone: form.timezone.value.trim() || 'UTC',
         notes: form.notes.value.trim(),
+        listId: recipientListId,
       }),
     });
     form.reset();
@@ -846,21 +909,30 @@ document.getElementById('recipient-form').addEventListener('submit', async (even
 
 document.getElementById('csv-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (!recipientListId) {
+    showToast('Pick a list first, such as Agencies or Restaurants');
+    return;
+  }
   const file = document.getElementById('csv-file').files[0];
   const pasted = document.getElementById('csv-text').value.trim();
+  const listName = contactLists.find((list) => list.id === recipientListId)?.name || 'this list';
   try {
     let summary;
     if (file) {
       const body = new FormData();
       body.append('file', file);
+      body.append('listId', recipientListId);
       summary = await api('/recipients/import', { method: 'POST', body });
     } else {
       summary = await api('/recipients/import', {
         method: 'POST',
-        body: JSON.stringify({ csv: pasted }),
+        body: JSON.stringify({ csv: pasted, listId: recipientListId }),
       });
     }
-    showToast(`Imported ${summary.created} new, ${summary.updated} updated`);
+    const extra = summary.skippedOtherList
+      ? `, ${summary.skippedOtherList} already on ${summary.otherListName || 'another list'}`
+      : '';
+    showToast(`Imported ${summary.created} new into ${listName}, ${summary.updated} updated${extra}`);
     document.getElementById('csv-form').reset();
     await loadRecipients();
   } catch (err) {
@@ -895,10 +967,12 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (event.target.id === 'remove-bounced-btn') {
-    if (!confirm('Delete all bounced recipients from the list?')) return;
+    const listName = contactLists.find((list) => list.id === recipientListId)?.name || 'this list';
+    if (!confirm(`Delete bounced recipients from ${listName}?`)) return;
     try {
-      const result = await api('/recipients/bounced', { method: 'DELETE' });
-      showToast(`Removed ${result.deleted} bounced contact${result.deleted === 1 ? '' : 's'}`);
+      const query = recipientListId ? `?listId=${encodeURIComponent(recipientListId)}` : '';
+      const result = await api(`/recipients/bounced${query}`, { method: 'DELETE' });
+      showToast(`Removed ${result.deleted} bounced contact${result.deleted === 1 ? '' : 's'} from ${listName}`);
       await loadRecipients();
       await loadCampaigns();
       await loadDashboard();
@@ -910,6 +984,28 @@ document.addEventListener('click', async (event) => {
   if (event.target.id === 'hide-audience-btn' || event.target.id === 'hide-bounces-btn') {
     const card = document.getElementById('campaign-audience-card');
     if (card) card.hidden = true;
+    return;
+  }
+  const listChip = event.target.closest('[data-contact-list]');
+  if (listChip) {
+    recipientListId = listChip.dataset.contactList || '';
+    await loadRecipients();
+    return;
+  }
+  if (event.target.id === 'new-list-btn') {
+    const name = prompt('New list name', 'Restaurants');
+    if (!name) return;
+    try {
+      const list = await api('/recipients/lists', {
+        method: 'POST',
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      recipientListId = list.id;
+      showToast(`${list.name} is ready. Import those contacts here.`);
+      await loadRecipients();
+    } catch (err) {
+      showToast(err.message);
+    }
     return;
   }
   const filterBtn = event.target.closest('[data-recipient-filter]');
@@ -931,8 +1027,32 @@ document.getElementById('recipient-search')?.addEventListener('input', (event) =
   }, 250);
 });
 
+document.getElementById('c-list')?.addEventListener('change', async (event) => {
+  campaignListId = event.target.value;
+  const pickerParams = new URLSearchParams({ status: 'active' });
+  if (campaignListId) pickerParams.set('listId', campaignListId);
+  pickerRecipients = await api(`/recipients?${pickerParams.toString()}`);
+  renderRecipientPicker(document.getElementById('c-recipient-search')?.value || '');
+});
+
 document.getElementById('c-recipient-search')?.addEventListener('input', (event) => {
   renderRecipientPicker(event.target.value);
+});
+
+document.getElementById('recipients-body')?.addEventListener('change', async (event) => {
+  const select = event.target.closest('[data-move-list]');
+  if (!select) return;
+  try {
+    await api(`/recipients/${select.dataset.moveList}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ listId: select.value }),
+    });
+    showToast('Moved to that list');
+    await loadRecipients();
+  } catch (err) {
+    showToast(err.message);
+    await loadRecipients();
+  }
 });
 
 document.getElementById('invite-form').addEventListener('submit', async (event) => {

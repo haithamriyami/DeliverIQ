@@ -20,6 +20,7 @@ function stepNameFor(stepNumber) {
 const campaignInclude = {
   template: true,
   createdBy: { select: { id: true, name: true, email: true } },
+  list: { select: { id: true, name: true } },
   steps: {
     orderBy: { stepNumber: 'asc' },
     include: { template: true },
@@ -83,6 +84,7 @@ export async function createCampaign({
   scheduledAt,
   recipientIds,
   notes,
+  listId,
   createdById,
 }) {
   const template = await prisma.template.findUnique({
@@ -96,11 +98,27 @@ export async function createCampaign({
   const uniqueIds = [...new Set(recipientIds)];
   const recipients = await prisma.recipient.findMany({
     where: { id: { in: uniqueIds } },
-    select: { id: true },
+    select: { id: true, listId: true, email: true, list: { select: { name: true } } },
   });
 
   if (recipients.length !== uniqueIds.length) {
     throw new HttpError(400, 'One or more recipient IDs are invalid');
+  }
+
+  if (listId) {
+    const mixed = recipients.filter((row) => row.listId !== listId);
+    if (mixed.length) {
+      throw new HttpError(
+        400,
+        `Those contacts are not on this list: ${mixed.slice(0, 5).map((row) => row.email).join(', ')}`
+      );
+    }
+  } else {
+    const listIds = [...new Set(recipients.map((row) => row.listId))];
+    if (listIds.length > 1) {
+      throw new HttpError(400, 'Pick contacts from one list only, such as Agencies or Restaurants');
+    }
+    listId = listIds[0] || null;
   }
 
   const assignments = await campaignAssignmentsForRecipients(uniqueIds);
@@ -132,6 +150,7 @@ export async function createCampaign({
       scheduledAt: new Date(scheduledAt),
       recipientIds: uniqueIds,
       notes: notes || '',
+      listId: listId || null,
       createdById: createdById || null,
       status: 'pending',
       steps: {
@@ -155,6 +174,7 @@ export async function listCampaigns() {
     include: {
       template: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true, email: true } },
+      list: { select: { id: true, name: true } },
       steps: {
         orderBy: { stepNumber: 'asc' },
         include: { template: { select: { id: true, name: true } } },

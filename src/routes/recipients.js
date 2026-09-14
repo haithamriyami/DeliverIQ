@@ -9,9 +9,12 @@ const upload = multer({
 
 const router = Router();
 
+router.get('/lists', recipientsController.lists);
+router.post('/lists', ...recipientsController.createList);
 router.post('/', ...recipientsController.create);
 router.get('/', recipientsController.list);
 router.delete('/bounced', recipientsController.removeBounced);
+router.patch('/:id', ...recipientsController.move);
 router.delete('/:id', ...recipientsController.remove);
 router.post('/import', upload.single('file'), recipientsController.importCsv);
 
