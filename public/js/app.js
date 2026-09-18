@@ -585,10 +585,14 @@ async function loadSettings() {
 async function loadPageData(page) {
   try {
     if (page === 'dashboard' || page === 'analytics') await loadDashboard();
-    if (page === 'campaigns' || page === 'reports') await loadCampaigns();
+    if (page === 'campaigns' || page === 'reports') {
+      await loadCampaigns();
+      syncGmailBounces({ quiet: true });
+    }
     if (page === 'recipients' || page === 'new-campaign') {
       await loadRecipients();
       await loadTemplates();
+      if (page === 'recipients') syncGmailBounces({ quiet: true });
     }
     if (page === 'templates') await loadTemplates();
     if (page === 'settings') await loadSettings();
@@ -628,6 +632,11 @@ async function sendCampaignBatches(campaignId, stepId) {
       );
       await loadCampaigns();
       await loadDashboard();
+    }
+    try {
+      await syncGmailBounces({ quiet: true });
+    } catch {
+      // Bounce inbox may need reconnect; send result already shown.
     }
   } finally {
     sendingCampaignId = null;
@@ -673,22 +682,40 @@ async function showCampaignAudience(campaignId, name, kind, stepId) {
   card.hidden = false;
 }
 
-async function syncGmailBounces() {
+async function syncGmailBounces({ quiet = false } = {}) {
   try {
     const result = await api('/campaigns/sync-bounces', { method: 'POST' });
-    showToast(
-      result.marked
-        ? `Marked ${result.marked} bounced address${result.marked === 1 ? '' : 'es'}`
-        : 'No bounce notices matched your list'
-    );
-    await loadRecipients();
-    await loadCampaigns();
-    await loadDashboard();
-  } catch (err) {
-    showToast(err.message);
-    if (/Reconnect Gmail/i.test(err.message)) {
-      location.hash = 'settings';
+    if (!quiet) {
+      if (result.marked) {
+        showToast(
+          `Marked ${result.marked} bounced address${result.marked === 1 ? '' : 'es'} from Gmail${
+            result.scanned > result.marked ? ` (${result.scanned} notices scanned)` : ''
+          }`
+        );
+      } else if (result.scanned) {
+        showToast(
+          `Found ${result.scanned} Gmail bounce notice${result.scanned === 1 ? '' : 's'}, but none matched contacts still on your lists`
+        );
+      } else {
+        showToast('No bounce or delay notices found in Gmail');
+      }
+    } else if (result.marked) {
+      showToast(`Updated ${result.marked} bounce${result.marked === 1 ? '' : 's'} from Gmail`);
     }
+    if (result.marked || !quiet) {
+      await loadRecipients();
+      await loadCampaigns();
+      await loadDashboard();
+    }
+    return result;
+  } catch (err) {
+    if (!quiet) {
+      showToast(err.message);
+      if (/Reconnect Gmail/i.test(err.message)) {
+        location.hash = 'settings';
+      }
+    }
+    return null;
   }
 }
 

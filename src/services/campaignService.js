@@ -652,24 +652,28 @@ export async function listCampaignBounces(campaignId) {
 }
 
 export async function syncBouncesFromGmail() {
-  const addresses = await listGmailBounceAddresses();
-  if (addresses.length === 0) {
+  const notices = await listGmailBounceAddresses();
+  if (notices.length === 0) {
     return { scanned: 0, marked: 0, emails: [] };
   }
 
+  const byEmail = new Map(notices.map((row) => [row.email, row.reason]));
   const recipients = await prisma.recipient.findMany({
-    where: { email: { in: addresses } },
+    where: { email: { in: [...byEmail.keys()] } },
   });
 
   const emails = [];
   for (const recipient of recipients) {
+    const reason =
+      byEmail.get(recipient.email) ||
+      recipient.lastError ||
+      'Gmail reported this address as undeliverable or delayed.';
+
     await prisma.recipient.update({
       where: { id: recipient.id },
       data: {
         status: 'bounced',
-        lastError:
-          recipient.lastError ||
-          'Gmail reported this address as undeliverable or delayed.',
+        lastError: reason,
       },
     });
 
@@ -677,18 +681,24 @@ export async function syncBouncesFromGmail() {
       where: { recipientId: recipient.id },
     });
 
+    if (rows.length === 0) {
+      emails.push(recipient.email);
+      continue;
+    }
+
     for (const row of rows) {
       await recordBounce({
         campaignId: row.campaignId,
         recipientId: recipient.id,
-        error: row.error || 'Gmail reported this address as undeliverable or delayed.',
+        stepId: row.stepId,
+        error: reason,
       });
     }
 
     emails.push(recipient.email);
   }
 
-  return { scanned: addresses.length, marked: emails.length, emails };
+  return { scanned: notices.length, marked: emails.length, emails };
 }
 
 export async function applyEngagementEvent({ campaignId, recipientId, event, stepId }) {

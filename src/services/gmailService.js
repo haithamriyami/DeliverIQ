@@ -174,6 +174,25 @@ export async function sendViaGmail({
 }
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const FAILED_HEADER_RE =
+  /(?:final-recipient|original-recipient|x-failed-recipients|failed[- ]recipients?)\s*[:=]\s*(?:rfc822;?\s*)?([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})/gi;
+const BOUNCE_QUERY = [
+  'newer_than:30d',
+  '(',
+  'from:mailer-daemon OR from:mailer-daemon@googlemail.com OR from:postmaster',
+  'OR subject:"Delivery Status Notification"',
+  'OR subject:Undeliverable OR subject:"Mail Delivery Subsystem"',
+  'OR subject:"returned to sender" OR subject:"Delivery incomplete"',
+  'OR subject:"Message not delivered" OR subject:"Address not found"',
+  'OR subject:"Delivery Status Notification (Failure)"',
+  'OR subject:"Delivery Status Notification (Delay)"',
+  'OR subject:"Mail Delivery Failed" OR subject:"failure notice"',
+  'OR "temporary problem delivering" OR "will try for"',
+  'OR "couldn\'t be delivered" OR "could not be delivered"',
+  'OR "wasn\'t delivered" OR "was not delivered"',
+  'OR "delivery has failed" OR "permanently rejected"',
+  ')',
+].join(' ');
 
 function decodeGmailData(data) {
   if (!data) return '';
@@ -195,6 +214,58 @@ function emailsInText(text) {
   return [...new Set(String(text || '').toLowerCase().match(EMAIL_RE) || [])];
 }
 
+function failedEmailsFromText(text) {
+  const found = new Set();
+  const raw = String(text || '');
+  for (const match of raw.matchAll(FAILED_HEADER_RE)) {
+    if (match[1]) found.add(match[1].toLowerCase());
+  }
+  return [...found];
+}
+
+function bounceReasonFromText(text, subject = '') {
+  const blob = `${subject}\n${text}`.toLowerCase();
+  if (/address not found|user unknown|does not exist|no such user|mailbox unavailable|550|551|553/.test(blob)) {
+    return 'Gmail: address not found / mailbox unavailable.';
+  }
+  if (/temporary problem|will try for|delivery incomplete|delay|try again later|421|450|451|452/.test(blob)) {
+    return 'Gmail: delivery delayed or temporarily failed.';
+  }
+  if (/spam|blocked|rejected|policy|554/.test(blob)) {
+    return 'Gmail: message rejected by the receiving server.';
+  }
+  if (/message not delivered|could not be delivered|wasn't delivered|delivery has failed|permanently rejected/.test(blob)) {
+    return 'Gmail: message was not delivered.';
+  }
+  return 'Gmail reported this address as undeliverable or delayed.';
+}
+
+function isNoiseEmail(email, senderEmail) {
+  if (!email) return true;
+  if (email === senderEmail) return true;
+  if (email.endsWith('.google.com') || email.endsWith('googlemail.com')) return true;
+  if (email.startsWith('mailer-daemon@') || email.startsWith('postmaster@')) return true;
+  return false;
+}
+
+async function listBounceMessageIds(gmail) {
+  const ids = [];
+  let pageToken;
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: 100,
+      q: BOUNCE_QUERY,
+      pageToken,
+    });
+    for (const item of list.data.messages || []) {
+      ids.push(item.id);
+    }
+    pageToken = list.data.nextPageToken || undefined;
+  } while (pageToken && ids.length < 100);
+  return ids.slice(0, 100);
+}
+
 export async function listGmailBounceAddresses() {
   const sender = await getWorkspaceSender();
   if (!sender) {
@@ -206,22 +277,9 @@ export async function listGmailBounceAddresses() {
   const gmail = google.gmail({ version: 'v1', auth: client });
   const senderEmail = String(sender.email || '').toLowerCase();
 
-  let list;
+  let messageIds;
   try {
-    list = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: 50,
-      q: [
-        'newer_than:21d',
-        '(from:mailer-daemon OR from:mailer-daemon@googlemail.com',
-        'OR subject:"Delivery Status Notification"',
-        'OR subject:Undeliverable OR subject:"Mail Delivery Subsystem"',
-        'OR subject:"returned to sender"',
-        'OR subject:"Delivery incomplete"',
-        'OR "temporary problem delivering"',
-        'OR "will try for")',
-      ].join(' '),
-    });
+    messageIds = await listBounceMessageIds(gmail);
   } catch (err) {
     const message = err.message || '';
     if (message.includes('insufficient') || message.includes('Insufficient') || err.code === 403 || err.response?.status === 403) {
@@ -230,24 +288,33 @@ export async function listGmailBounceAddresses() {
     throw err;
   }
 
-  const bounced = new Set();
-  for (const item of list.data.messages || []) {
+  const byEmail = new Map();
+  for (const id of messageIds) {
     const message = await gmail.users.messages.get({
       userId: 'me',
-      id: item.id,
+      id,
       format: 'full',
     });
     const headers = message.data.payload?.headers || [];
+    const subject = headers.find((h) => h.name?.toLowerCase() === 'subject')?.value || '';
     const headerText = headers.map((h) => `${h.name}: ${h.value}`).join('\n');
     const bodyText = collectGmailText(message.data.payload).join('\n');
     const snippet = message.data.snippet || '';
-    const found = emailsInText(`${headerText}\n${bodyText}\n${snippet}`).filter(
-      (email) => email !== senderEmail && !email.endsWith('.google.com')
-    );
+    const fullText = `${headerText}\n${bodyText}\n${snippet}`;
+    const reason = bounceReasonFromText(fullText, subject);
+
+    let found = failedEmailsFromText(fullText);
+    if (found.length === 0) {
+      found = emailsInText(fullText);
+    }
+
     for (const email of found) {
-      bounced.add(email);
+      if (isNoiseEmail(email, senderEmail)) continue;
+      if (!byEmail.has(email)) {
+        byEmail.set(email, reason);
+      }
     }
   }
 
-  return [...bounced];
+  return [...byEmail.entries()].map(([email, reason]) => ({ email, reason }));
 }
