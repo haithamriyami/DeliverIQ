@@ -561,6 +561,7 @@ export async function recordBounce({ campaignId, recipientId, error, stepId }) {
       ...(campaignId ? { campaignId } : {}),
       ...(stepId ? { stepId } : {}),
     },
+    orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
   });
 
   if (rows.length === 0 && campaignId) {
@@ -585,8 +586,15 @@ export async function recordBounce({ campaignId, recipientId, error, stepId }) {
     }
   }
 
+  // Live send failures pass stepId — mark that attempt only.
+  // Inbox sync without a step must not rewrite opened/clicked history, and must not
+  // flip every past email for the same person into a bounce (that inflated dashboard totals).
+  const targets = stepId
+    ? rows
+    : rows.filter((row) => row.status === 'sent' || row.status === 'bounced').slice(0, 1);
+
   let last = null;
-  for (const row of rows) {
+  for (const row of targets) {
     last = await prisma.campaignRecipient.update({
       where: { id: row.id },
       data: {
@@ -677,20 +685,17 @@ export async function syncBouncesFromGmail() {
       },
     });
 
-    const rows = await prisma.campaignRecipient.findMany({
-      where: { recipientId: recipient.id },
+    // Only mark the latest uncertain send as bounced — not every past follow-up row.
+    const latestSent = await prisma.campaignRecipient.findFirst({
+      where: { recipientId: recipient.id, status: 'sent' },
+      orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
     });
 
-    if (rows.length === 0) {
-      emails.push(recipient.email);
-      continue;
-    }
-
-    for (const row of rows) {
+    if (latestSent) {
       await recordBounce({
-        campaignId: row.campaignId,
+        campaignId: latestSent.campaignId,
         recipientId: recipient.id,
-        stepId: row.stepId,
+        stepId: latestSent.stepId,
         error: reason,
       });
     }
@@ -924,12 +929,16 @@ async function livePendingCount(campaign, step) {
 }
 
 export async function getDashboard() {
-  const [campaigns, recipients, grouped] = await Promise.all([
+  const [campaigns, recipients, grouped, attemptedPeople] = await Promise.all([
     listCampaignsWithStats(),
-    prisma.recipient.findMany(),
+    prisma.recipient.findMany({ select: { id: true, status: true } }),
     prisma.campaignRecipient.groupBy({
       by: ['status'],
       _count: { _all: true },
+    }),
+    prisma.campaignRecipient.findMany({
+      select: { recipientId: true },
+      distinct: ['recipientId'],
     }),
   ]);
 
@@ -939,8 +948,11 @@ export async function getDashboard() {
   }
   const funnel = funnelFromCounts(counts);
 
+  // Unique people, not bounce rows across every follow-up (that was inflating 186 → 229).
   const bouncedRecipients = recipients.filter((r) => r.status === 'bounced').length;
   const unsubscribedRecipients = recipients.filter((r) => r.status === 'unsubscribed').length;
+  const attemptedUnique = attemptedPeople.length;
+  const bounceRate = attemptedUnique ? bouncedRecipients / attemptedUnique : 0;
 
   const upcoming = campaigns
     .filter((c) => c.status === 'pending' || c.status === 'sending')
@@ -961,15 +973,15 @@ export async function getDashboard() {
       totalCampaigns: campaigns.length,
       emailsSent: funnel.sent,
       openRate: funnel.openRate,
-      bounceRate: funnel.bounceRate,
-      bounced: funnel.bounced,
+      bounceRate,
+      bounced: bouncedRecipients,
       pending: campaigns.reduce((sum, c) => sum + (c.totals?.pending || 0), 0),
     },
     recent: campaigns.slice(0, 8),
     upcoming,
     chart,
     bounceUnsub: {
-      bounces: bouncedRecipients || funnel.bounced,
+      bounces: bouncedRecipients,
       unsubscribes: unsubscribedRecipients,
     },
   };
