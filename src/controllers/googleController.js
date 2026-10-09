@@ -7,7 +7,7 @@ import * as gmailService from '../services/gmailService.js';
 
 function signGoogleState(user) {
   return jwt.sign(
-    { userId: user.id, workspaceId: user.workspaceId },
+    { userId: user.id },
     env.sessionSecret,
     { expiresIn: '10m' }
   );
@@ -27,7 +27,6 @@ function appHost() {
 
 export const start = [
   requireAuth,
-  requireOwner,
   asyncHandler(async (req, res) => {
     const expected = appHost();
     const actual = requestHost(req);
@@ -55,7 +54,7 @@ export const callback = asyncHandler(async (req, res) => {
   }
 
   await gmailService.connectGmail({
-    workspaceId: payload.workspaceId,
+    userId: payload.userId,
     code: String(code),
   });
 
@@ -64,9 +63,8 @@ export const callback = asyncHandler(async (req, res) => {
 
 export const disconnect = [
   requireAuth,
-  requireOwner,
   asyncHandler(async (req, res) => {
-    await gmailService.disconnectGmail(req.user.workspaceId);
+    await gmailService.disconnectGmail(req.user.id);
     res.json({ ok: true });
   }),
 ];

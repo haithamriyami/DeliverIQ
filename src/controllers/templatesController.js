@@ -48,6 +48,32 @@ const templateIdSchema = z.object({
   query: z.any().optional(),
 });
 
+const updateTemplateSchema = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: z.object({
+    name: z.string().min(1).optional(),
+    body: z.string().min(1).optional(),
+  }),
+  query: z.any().optional(),
+});
+
+export const update = [
+  validate(updateTemplateSchema),
+  asyncHandler(async (req, res) => {
+    const existing = await prisma.template.findUnique({
+      where: { id: req.validated.params.id },
+    });
+    if (!existing) {
+      throw new HttpError(404, 'Template not found');
+    }
+    const template = await prisma.template.update({
+      where: { id: req.validated.params.id },
+      data: req.validated.body,
+    });
+    res.json(template);
+  }),
+];
+
 export const remove = [
   validate(templateIdSchema),
   asyncHandler(async (req, res) => {

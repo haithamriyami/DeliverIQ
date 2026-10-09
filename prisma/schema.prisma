@@ -43,6 +43,8 @@ model Workspace {
   gmailEmail        String?   @map("gmail_email")
   gmailRefreshToken String?   @map("gmail_refresh_token")
   gmailConnectedAt  DateTime? @map("gmail_connected_at")
+  fromDisplayName   String?   @map("from_display_name")
+  replyToEmail      String?   @map("reply_to_email")
 
   @@map("workspaces")
 }
@@ -55,6 +57,10 @@ model User {
   role         UserRole @default(member)
   workspaceId  String   @map("workspace_id")
   createdAt    DateTime @default(now()) @map("created_at")
+
+  gmailEmail        String?   @map("gmail_email")
+  gmailRefreshToken String?   @map("gmail_refresh_token")
+  gmailConnectedAt  DateTime? @map("gmail_connected_at")
 
   workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaigns Campaign[]
@@ -171,6 +177,8 @@ model CampaignRecipient {
   status      CampaignRecipientStatus
   error       String                   @default("")
   sentAt      DateTime?                @map("sent_at")
+  messageId   String?                  @map("message_id")
+  threadId    String?                  @map("thread_id")
 
   campaign  Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   step      CampaignStep @relation(fields: [stepId], references: [id], onDelete: Cascade)

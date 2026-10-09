@@ -298,7 +298,7 @@ export async function enqueueCampaign(campaignId, stepId) {
       await sleep(SEND_GAP_MS);
     }
     try {
-      await sendCampaignEmail({
+      const sendResult = await sendCampaignEmail({
         to: recipient.email,
         name: recipient.name,
         subject: step.subject,
@@ -307,19 +307,38 @@ export async function enqueueCampaign(campaignId, stepId) {
         recipientId: recipient.id,
         stepId: step.id,
         unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
+        userId: campaign.createdById,
       });
-      await recordSend({ campaignId: campaign.id, recipientId: recipient.id, stepId: step.id });
+      await recordSend({ 
+        campaignId: campaign.id, 
+        recipientId: recipient.id, 
+        stepId: step.id,
+        messageId: sendResult?.messageId,
+        threadId: sendResult?.threadId,
+      });
       enqueued += 1;
     } catch (err) {
       failed += 1;
-      errors.push({ email: recipient.email, error: err.message });
-      console.error(`[send] ${recipient.email}`, err.message);
-      await recordBounce({
-        campaignId: campaign.id,
-        recipientId: recipient.id,
-        stepId: step.id,
-        error: err.message,
-      });
+      const message = String(err.message || '').toLowerCase();
+      const isAuthError = /invalid.*credentials|insufficient|permission|unauthorized|forbidden|gmail.*not.*connected|connect.*gmail|401|403/.test(message);
+      const isRateLimit = /rate.*limit|too.*many.*requests|quota|429/.test(message);
+      
+      if (isAuthError) {
+        errors.push({ email: recipient.email, error: 'Gmail not connected or permission denied. Reconnect Gmail in Settings.' });
+        console.error(`[send] Auth error for ${recipient.email}: ${err.message}`);
+      } else if (isRateLimit) {
+        errors.push({ email: recipient.email, error: 'Rate limit reached. Try again later.' });
+        console.error(`[send] Rate limit for ${recipient.email}: ${err.message}`);
+      } else {
+        errors.push({ email: recipient.email, error: err.message });
+        console.error(`[send] ${recipient.email}`, err.message);
+        await recordBounce({
+          campaignId: campaign.id,
+          recipientId: recipient.id,
+          stepId: step.id,
+          error: err.message,
+        });
+      }
     }
   }
 
@@ -505,7 +524,7 @@ const STATUS_RANK = {
   bounced: 4,
 };
 
-export async function recordSend({ campaignId, recipientId, stepId }) {
+export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId }) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: { orderBy: { stepNumber: 'asc' } } },
@@ -531,6 +550,8 @@ export async function recordSend({ campaignId, recipientId, stepId }) {
         recipientId,
         status: 'sent',
         sentAt: new Date(),
+        messageId: messageId || null,
+        threadId: threadId || null,
       },
     });
   }
@@ -543,6 +564,8 @@ export async function recordSend({ campaignId, recipientId, stepId }) {
     data: {
       sentAt: existing.sentAt || new Date(),
       status: keepStatus,
+      messageId: messageId || existing.messageId,
+      threadId: threadId || existing.threadId,
     },
   });
 }

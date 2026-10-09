@@ -56,7 +56,7 @@ export function gmailAuthUrl(state) {
   });
 }
 
-export async function connectGmail({ workspaceId, code }) {
+export async function connectGmail({ userId, code }) {
   const client = createOAuthClient();
   const { tokens } = await client.getToken(code);
   if (!tokens.refresh_token) {
@@ -70,8 +70,8 @@ export async function connectGmail({ workspaceId, code }) {
   const oauth2 = google.oauth2({ version: 'v2', auth: client });
   const { data } = await oauth2.userinfo.get();
 
-  return prisma.workspace.update({
-    where: { id: workspaceId },
+  return prisma.user.update({
+    where: { id: userId },
     data: {
       gmailEmail: data.email,
       gmailRefreshToken: encrypt(tokens.refresh_token),
@@ -80,9 +80,9 @@ export async function connectGmail({ workspaceId, code }) {
   });
 }
 
-export async function disconnectGmail(workspaceId) {
-  return prisma.workspace.update({
-    where: { id: workspaceId },
+export async function disconnectGmail(userId) {
+  return prisma.user.update({
+    where: { id: userId },
     data: {
       gmailEmail: null,
       gmailRefreshToken: null,
@@ -91,38 +91,70 @@ export async function disconnectGmail(workspaceId) {
   });
 }
 
-export async function gmailStatus(workspaceId) {
-  const workspace = await prisma.workspace.findUnique({
-    where: { id: workspaceId },
+export async function gmailStatus(userId) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
     select: { gmailEmail: true, gmailConnectedAt: true },
   });
 
   return {
     configured: googleConfigured(),
-    connected: Boolean(workspace?.gmailEmail),
-    email: workspace?.gmailEmail || null,
-    connectedAt: workspace?.gmailConnectedAt || null,
+    connected: Boolean(user?.gmailEmail),
+    email: user?.gmailEmail || null,
+    connectedAt: user?.gmailConnectedAt || null,
     redirectUri: env.google.redirectUri,
     origin: env.appUrl,
     localRedirectUri: 'http://127.0.0.1:3000/auth/google/callback',
   };
 }
 
-export async function getWorkspaceSender(workspaceId) {
-  const workspace = workspaceId
-    ? await prisma.workspace.findUnique({ where: { id: workspaceId } })
-    : await prisma.workspace.findFirst({
+export async function getUserSender(userId) {
+  const user = userId
+    ? await prisma.user.findUnique({ 
+        where: { id: userId },
+        include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
+      })
+    : await prisma.user.findFirst({
         where: { gmailRefreshToken: { not: null } },
+        include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
       });
 
-  if (!workspace?.gmailRefreshToken) {
+  if (!user?.gmailRefreshToken) {
     return null;
   }
 
   return {
-    email: workspace.gmailEmail,
-    refreshToken: decrypt(workspace.gmailRefreshToken),
+    email: user.gmailEmail,
+    refreshToken: decrypt(user.gmailRefreshToken),
+    fromDisplayName: user.workspace?.fromDisplayName,
+    replyToEmail: user.workspace?.replyToEmail,
   };
+}
+
+export async function getWorkspaceSender(workspaceId) {
+  return getUserSender(null);
+}
+
+function htmlToPlainText(html) {
+  return html
+    .replace(/<style[^>]*>.*?<\/style>/gis, '')
+    .replace(/<script[^>]*>.*?<\/script>/gis, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/h[1-6]>/gi, '\n\n')
+    .replace(/<li>/gi, '- ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n\s*\n\s*\n/g, '\n\n')
+    .trim();
 }
 
 export async function sendViaGmail({
@@ -131,8 +163,13 @@ export async function sendViaGmail({
   subject,
   html,
   unsubscribeUrl,
+  replyTo,
+  inReplyTo,
+  references,
+  threadId,
+  userId,
 }) {
-  const sender = await getWorkspaceSender();
+  const sender = await getUserSender(userId);
   if (!sender) {
     return null;
   }
@@ -141,34 +178,76 @@ export async function sendViaGmail({
   client.setCredentials({ refresh_token: sender.refreshToken });
 
   const gmail = google.gmail({ version: 'v1', auth: client });
-  const from = fromName ? `${fromName} <${sender.email}>` : sender.email;
+  const displayName = fromName || sender.fromDisplayName || 'DeliverIQ';
+  const from = `${displayName} <${sender.email}>`;
+  const plainText = htmlToPlainText(html);
   const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
+  const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+  
   const headers = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${encodedSubject}`,
     'MIME-Version: 1.0',
-    'Content-Type: text/html; charset=UTF-8',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
   ];
+  
+  if (replyTo || sender.replyToEmail) {
+    headers.push(`Reply-To: ${replyTo || sender.replyToEmail}`);
+  }
+  
+  if (inReplyTo) {
+    headers.push(`In-Reply-To: ${inReplyTo}`);
+  }
+  
+  if (references) {
+    headers.push(`References: ${references}`);
+  }
+  
   if (unsubscribeUrl) {
-    headers.push(`List-Unsubscribe: <${unsubscribeUrl}>`);
+    headers.push(`List-Unsubscribe: <${unsubscribeUrl}>, <mailto:unsubscribe@deliveriq.local?subject=unsubscribe>`);
+    headers.push('List-Unsubscribe-Post: List-Unsubscribe=One-Click');
   }
 
-  const raw = Buffer.from(`${headers.join('\r\n')}\r\n\r\n${html}`)
+  const body = [
+    headers.join('\r\n'),
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    plainText,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    html,
+    '',
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const raw = Buffer.from(body)
     .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
+  const requestBody = { raw };
+  if (threadId) {
+    requestBody.threadId = threadId;
+  }
+
   const response = await gmail.users.messages.send({
     userId: 'me',
-    requestBody: { raw },
+    requestBody,
   });
 
   return {
     dryRun: false,
     provider: 'gmail',
     messageId: response.data.id,
+    threadId: response.data.threadId,
     from: sender.email,
   };
 }
@@ -223,21 +302,26 @@ function failedEmailsFromText(text) {
   return [...found];
 }
 
-function bounceReasonFromText(text, subject = '') {
+function bounceTypeFromText(text, subject = '') {
   const blob = `${subject}\n${text}`.toLowerCase();
-  if (/address not found|user unknown|does not exist|no such user|mailbox unavailable|550|551|553/.test(blob)) {
-    return 'Gmail: address not found / mailbox unavailable.';
+  
+  if (/temporary problem|will try for|delivery incomplete|delay|try again later|still trying|421|450|451|452/.test(blob)) {
+    return { type: 'delay', reason: 'Gmail: delivery delayed, will retry.' };
   }
-  if (/temporary problem|will try for|delivery incomplete|delay|try again later|421|450|451|452/.test(blob)) {
-    return 'Gmail: delivery delayed or temporarily failed.';
+  
+  if (/address not found|user unknown|does not exist|no such user|mailbox unavailable|recipient address rejected|550|551|553/.test(blob)) {
+    return { type: 'bounce', reason: 'Gmail: address not found or mailbox unavailable.' };
   }
-  if (/spam|blocked|rejected|policy|554/.test(blob)) {
-    return 'Gmail: message rejected by the receiving server.';
+  
+  if (/spam|blocked|rejected|policy|prohibited|554/.test(blob)) {
+    return { type: 'bounce', reason: 'Gmail: message rejected by the receiving server.' };
   }
-  if (/message not delivered|could not be delivered|wasn't delivered|delivery has failed|permanently rejected/.test(blob)) {
-    return 'Gmail: message was not delivered.';
+  
+  if (/message not delivered|could not be delivered|wasn't delivered|delivery has failed|permanently rejected|permanent error|permanent failure/.test(blob)) {
+    return { type: 'bounce', reason: 'Gmail: message was not delivered (permanent failure).' };
   }
-  return 'Gmail reported this address as undeliverable or delayed.';
+  
+  return { type: 'bounce', reason: 'Gmail reported this address as undeliverable.' };
 }
 
 function isNoiseEmail(email, senderEmail) {
@@ -301,11 +385,19 @@ export async function listGmailBounceAddresses() {
     const bodyText = collectGmailText(message.data.payload).join('\n');
     const snippet = message.data.snippet || '';
     const fullText = `${headerText}\n${bodyText}\n${snippet}`;
-    const reason = bounceReasonFromText(fullText, subject);
+    const { type, reason } = bounceTypeFromText(fullText, subject);
+
+    if (type === 'delay') {
+      continue;
+    }
 
     let found = failedEmailsFromText(fullText);
     if (found.length === 0) {
       found = emailsInText(fullText);
+    }
+
+    if (found.length === 0) {
+      continue;
     }
 
     for (const email of found) {

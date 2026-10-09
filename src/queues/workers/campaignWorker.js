@@ -14,7 +14,11 @@ export function createCampaignWorker() {
       const [campaign, recipient, step] = await Promise.all([
         prisma.campaign.findUnique({
           where: { id: campaignId },
-          include: { template: true, steps: { orderBy: { stepNumber: 'asc' } } },
+          include: { 
+            template: true, 
+            steps: { orderBy: { stepNumber: 'asc' } },
+            createdBy: { select: { id: true } },
+          },
         }),
         prisma.recipient.findUnique({ where: { id: recipientId } }),
         stepId
@@ -51,8 +55,9 @@ export function createCampaignWorker() {
         return { skipped: true, reason: 'already_sent' };
       }
 
+      let sendResult;
       try {
-        await sendCampaignEmail({
+        sendResult = await sendCampaignEmail({
           to: recipient.email,
           name: recipient.name,
           subject: activeStep.subject,
@@ -61,13 +66,29 @@ export function createCampaignWorker() {
           recipientId,
           stepId: activeStep.id,
           unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
+          userId: campaign.createdBy?.id,
         });
       } catch (err) {
+        const message = String(err.message || '').toLowerCase();
+        const isAuthError = /invalid.*credentials|insufficient|permission|unauthorized|forbidden|gmail.*not.*connected|connect.*gmail|401|403/.test(message);
+        const isRateLimit = /rate.*limit|too.*many.*requests|quota|429/.test(message);
+        
+        if (isAuthError || isRateLimit) {
+          console.error(`[worker] Send failed (${isAuthError ? 'auth' : 'rate limit'}): ${err.message}`);
+          throw err;
+        }
+        
         await recordBounce({ campaignId, recipientId, stepId: activeStep.id, error: err.message });
         throw err;
       }
 
-      await recordSend({ campaignId, recipientId, stepId: activeStep.id });
+      await recordSend({ 
+        campaignId, 
+        recipientId, 
+        stepId: activeStep.id,
+        messageId: sendResult?.messageId,
+        threadId: sendResult?.threadId,
+      });
       await maybeCompleteCampaign(campaignId, activeStep.id);
 
       return { skipped: false, recipientId, campaignId, stepId: activeStep.id };

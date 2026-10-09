@@ -115,7 +115,7 @@ export const me = [
         fromEmail: env.sendgrid.fromEmail,
         fromName: env.sendgrid.fromName,
       },
-      google: await gmailService.gmailStatus(req.user.workspaceId),
+      google: await gmailService.gmailStatus(req.user.id),
       tracking: {
         appUrl: env.appUrl,
         public: !isPrivateAppUrl(env.appUrl),

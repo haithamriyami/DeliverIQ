@@ -487,21 +487,27 @@ function renderRecipientPicker(query) {
     : `<p class="muted">No ${escapeHtml(listName)} contacts match that search</p>`;
 }
 
+let editingTemplate = null;
+
 async function loadTemplates() {
   const templates = await api('/templates');
   document.getElementById('template-grid').innerHTML = templates.length
     ? templates
         .map(
-          (t) => `<article class="card template-card">
-            <h3>${t.name}</h3>
-            <p>${t.body.replace(/<[^>]+>/g, ' ').slice(0, 140)}</p>
-            <button class="btn btn-danger btn-small" data-delete-template="${t.id}">Delete</button>
+          (t) => `<article class="card template-card" data-template-id="${t.id}">
+            <h3>${escapeHtml(t.name)}</h3>
+            <p>${escapeHtml(t.body.replace(/<[^>]+>/g, ' ').slice(0, 140))}</p>
+            <div class="template-actions">
+              <button class="btn btn-primary btn-small" data-edit-template="${t.id}">Edit</button>
+              <button class="btn btn-ghost btn-small" data-preview-template="${t.id}">Preview</button>
+              <button class="btn btn-danger btn-small" data-delete-template="${t.id}">Delete</button>
+            </div>
           </article>`
         )
         .join('')
     : '<p class="empty">No templates yet</p>';
   const select = document.getElementById('c-template');
-  select.innerHTML = templates.map((t) => `<option value="${t.id}">${t.name}</option>`).join('');
+  select.innerHTML = templates.map((t) => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
   const followSelect = document.getElementById('followup-template');
   if (followSelect) {
     followSelect.innerHTML = select.innerHTML;
@@ -541,20 +547,19 @@ async function loadSettings() {
   const actions = document.getElementById('gmail-actions');
   if (google.connected) {
     gmailEl.innerHTML = `<span class="sendgrid-pill live">Gmail connected · ${google.email}</span>`;
-    actions.innerHTML =
-      me.user.role === 'owner'
-        ? `<a class="btn btn-primary" href="/auth/google">Reconnect Gmail</a>
-           <button class="btn btn-ghost" id="sync-gmail-bounces" type="button">Check bounce inbox</button>
-           <button class="btn btn-ghost" id="gmail-disconnect" type="button">Disconnect Gmail</button>
-           <p class="muted">Reconnect once so DeliverIQ can read bounce notices. Then Check bounce inbox after a send.</p>`
-        : '';
+    actions.innerHTML = `
+      <a class="btn btn-primary" href="/auth/google">Reconnect Gmail</a>
+      <button class="btn btn-ghost" id="sync-gmail-bounces" type="button">Check bounce inbox</button>
+      <button class="btn btn-ghost" id="gmail-disconnect" type="button">Disconnect Gmail</button>
+      <p class="muted">Your Gmail account is connected. You can send campaigns and they will be sent from ${google.email}. Reconnect to refresh permissions, then check bounce inbox after a send.</p>
+    `;
   } else if (google.configured) {
-    gmailEl.innerHTML = '<span class="sendgrid-pill dry">Gmail ready — connect your Google account</span>';
-    const connectBtn =
-      me.user.role === 'owner'
-        ? '<a class="btn btn-primary" href="/auth/google">Connect Gmail</a>'
-        : '<p class="muted">Ask the owner to connect Gmail in Settings.</p>';
-    actions.innerHTML = `${connectBtn}${googleRedirectHelp(google)}`;
+    gmailEl.innerHTML = '<span class="sendgrid-pill dry">Gmail ready - connect your Google account</span>';
+    actions.innerHTML = `
+      <a class="btn btn-primary" href="/auth/google">Connect Gmail</a>
+      <p class="muted">Each team member can connect their own Gmail account. Campaigns you create will be sent from your connected Gmail address.</p>
+      ${googleRedirectHelp(google)}
+    `;
   } else {
     gmailEl.innerHTML = '<span class="sendgrid-pill dry">Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env</span>';
     actions.innerHTML = googleRedirectHelp(google);
@@ -762,6 +767,8 @@ document.addEventListener('click', async (event) => {
     const delCampaign = event.target.closest('[data-delete-campaign]');
     const delRecipient = event.target.closest('[data-delete-recipient]');
     const delTemplate = event.target.closest('[data-delete-template]');
+    const editTemplate = event.target.closest('[data-edit-template]');
+    const previewTemplate = event.target.closest('[data-preview-template]');
     if (delCampaign) {
       if (!confirm('Delete this campaign? This cannot be undone.')) return;
       await api(`/campaigns/${delCampaign.dataset.deleteCampaign}`, { method: 'DELETE' });
@@ -784,6 +791,41 @@ document.addEventListener('click', async (event) => {
       await api(`/templates/${delTemplate.dataset.deleteTemplate}`, { method: 'DELETE' });
       showToast('Template deleted');
       await loadTemplates();
+      editingTemplate = null;
+      document.getElementById('template-form').reset();
+      document.querySelector('#page-templates .form-actions button').textContent = 'Save template';
+    }
+    if (editTemplate) {
+      const template = await api(`/templates/${editTemplate.dataset.editTemplate}`);
+      editingTemplate = template;
+      const form = document.getElementById('template-form');
+      form.name.value = template.name;
+      form.body.value = template.body;
+      document.querySelector('#page-templates .form-actions button').textContent = 'Update template';
+      form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    if (previewTemplate) {
+      const template = await api(`/templates/${previewTemplate.dataset.previewTemplate}`);
+      const win = window.open('', 'Template Preview', 'width=800,height=600');
+      win.document.write(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>${escapeHtml(template.name)} - Preview</title>
+          <style>
+            body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }
+            h1 { font-size: 18px; margin-bottom: 20px; color: #64748b; }
+          </style>
+        </head>
+        <body>
+          <h1>Preview: ${escapeHtml(template.name)}</h1>
+          ${template.body}
+        </body>
+        </html>
+      `);
+      win.document.close();
     }
   } catch (err) {
     showToast(err.message);
@@ -896,16 +938,49 @@ document.getElementById('template-form').addEventListener('submit', async (event
   event.preventDefault();
   const form = event.currentTarget;
   try {
-    await api('/templates', {
-      method: 'POST',
-      body: JSON.stringify({ name: form.name.value.trim(), body: form.body.value }),
-    });
+    if (editingTemplate) {
+      await api(`/templates/${editingTemplate.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: form.name.value.trim(), body: form.body.value }),
+      });
+      showToast('Template updated');
+      editingTemplate = null;
+      document.querySelector('#page-templates .form-actions button[type="submit"]').textContent = 'Save template';
+    } else {
+      await api('/templates', {
+        method: 'POST',
+        body: JSON.stringify({ name: form.name.value.trim(), body: form.body.value }),
+      });
+      showToast('Template saved');
+    }
     form.reset();
-    showToast('Template saved');
     await loadTemplates();
   } catch (err) {
     showToast(err.message);
   }
+});
+
+document.getElementById('insert-video-btn').addEventListener('click', () => {
+  const videoUrl = prompt('Enter video URL (e.g. YouTube, Vimeo, or video file):');
+  if (!videoUrl) return;
+  
+  const thumbnailUrl = prompt('Enter thumbnail image URL (leave empty for default):');
+  const altText = prompt('Enter alt text for accessibility (optional):', 'Video thumbnail');
+  
+  const thumb = thumbnailUrl || 'https://via.placeholder.com/600x400/1c4b96/ffffff?text=Play+Video';
+  const videoBlock = `
+<div style="margin: 20px 0; text-align: center;">
+  <a href="${escapeHtml(videoUrl)}" target="_blank" rel="noopener" style="display: inline-block; text-decoration: none;">
+    <img src="${escapeHtml(thumb)}" alt="${escapeHtml(altText)}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+    <div style="margin-top: 10px; color: #2f6fed; font-weight: 500;">▶ Watch Video</div>
+  </a>
+</div>
+`;
+  
+  const bodyField = document.getElementById('t-body');
+  bodyField.value = bodyField.value + '\n' + videoBlock;
+  bodyField.focus();
+  showToast('Video block inserted');
 });
 
 document.getElementById('recipient-form').addEventListener('submit', async (event) => {
