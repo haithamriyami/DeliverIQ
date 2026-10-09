@@ -89,5 +89,5 @@ export function withEngagementTracking(html, { campaignId, recipientId, stepId, 
     return tracked;
   }
 
-  return `${pixel}${tracked}${pixel}`;
+  return `${tracked}${pixel}`;
 }

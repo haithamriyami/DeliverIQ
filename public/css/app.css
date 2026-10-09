@@ -617,6 +617,14 @@ tr:last-child td {
   font-size: 13px;
   color: var(--muted);
   line-height: 1.45;
+  flex: 1;
+}
+
+.template-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  flex-wrap: wrap;
 }
 
 .muted {

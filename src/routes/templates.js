@@ -6,6 +6,7 @@ const router = Router();
 router.post('/', ...templatesController.create);
 router.get('/', templatesController.list);
 router.get('/:id', templatesController.getById);
+router.patch('/:id', ...templatesController.update);
 router.delete('/:id', ...templatesController.remove);
 
 export default router;

@@ -2,6 +2,7 @@ import { env } from '../config/env.js';
 import { sgMail, sendgridEnabled } from '../config/sendgrid.js';
 import { sendViaGmail } from './gmailService.js';
 import { withEngagementTracking } from '../utils/tracking.js';
+import { prisma } from '../lib/prisma.js';
 
 export function interpolate(template, vars) {
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
@@ -39,6 +40,7 @@ export async function sendCampaignEmail({
   recipientId,
   stepId,
   unsubscribeUrl,
+  userId,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to });
   const renderedHtml = withEngagementTracking(
@@ -48,6 +50,37 @@ export async function sendCampaignEmail({
     ),
     { campaignId, recipientId, stepId, unsubscribeUrl }
   );
+
+  let threadingInfo = {};
+  if (stepId) {
+    const campaign = await prisma.campaign.findUnique({
+      where: { id: campaignId },
+      include: { steps: { orderBy: { stepNumber: 'asc' } } },
+    });
+    
+    if (campaign?.steps?.length > 1) {
+      const currentStepIndex = campaign.steps.findIndex(s => s.id === stepId);
+      if (currentStepIndex > 0) {
+        const previousSteps = campaign.steps.slice(0, currentStepIndex);
+        for (let i = previousSteps.length - 1; i >= 0; i--) {
+          const prevStep = previousSteps[i];
+          const prevSend = await prisma.campaignRecipient.findUnique({
+            where: {
+              stepId_recipientId: { stepId: prevStep.id, recipientId },
+            },
+            select: { messageId: true, threadId: true },
+          });
+          
+          if (prevSend?.messageId) {
+            threadingInfo.inReplyTo = prevSend.messageId;
+            threadingInfo.references = prevSend.messageId;
+            threadingInfo.threadId = prevSend.threadId;
+            break;
+          }
+        }
+      }
+    }
+  }
 
   const message = {
     to,
@@ -80,6 +113,8 @@ export async function sendCampaignEmail({
     subject: renderedSubject,
     html: renderedHtml,
     unsubscribeUrl,
+    userId,
+    ...threadingInfo,
   });
   if (gmailResult) {
     return gmailResult;

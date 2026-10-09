@@ -1,11 +1,23 @@
 import { parse } from 'csv-parse/sync';
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../middleware/errorHandler.js';
+import { isValidEmailSyntax, checkEmailDomain, normalizeEmail } from '../utils/emailValidation.js';
 
 export async function createRecipient({ email, name, timezone, notes, listId }) {
+  const normalized = normalizeEmail(email);
+  
+  if (!isValidEmailSyntax(normalized)) {
+    throw new HttpError(400, 'Invalid email address syntax');
+  }
+  
+  const dnsCheck = await checkEmailDomain(normalized);
+  if (!dnsCheck.valid) {
+    throw new HttpError(400, `Email address is not deliverable: ${dnsCheck.reason}`);
+  }
+  
   const list = await getContactListById(listId);
   const existing = await prisma.recipient.findUnique({
-    where: { email: email.toLowerCase() },
+    where: { email: normalized },
     include: { list: { select: { id: true, name: true } } },
   });
 
@@ -20,7 +32,7 @@ export async function createRecipient({ email, name, timezone, notes, listId }) 
 
   return prisma.recipient.create({
     data: {
-      email: email.toLowerCase(),
+      email: normalized,
       name,
       timezone: timezone || 'UTC',
       notes: notes || '',
@@ -285,16 +297,32 @@ export async function importRecipientsFromCsv(csvText, listId) {
     created: 0,
     updated: 0,
     skippedInvalid: 0,
+    skippedDns: 0,
+    skippedDuplicate: 0,
     skippedBounced: 0,
     skippedUnsubscribed: 0,
     skippedOtherList: 0,
     otherListName: '',
   };
 
+  const seenInFile = new Set();
+
   for (const row of records.slice(1)) {
-    const email = String(row[emailIndex] || '').trim().toLowerCase();
-    if (!email || !email.includes('@')) {
+    const email = normalizeEmail(String(row[emailIndex] || ''));
+    if (!isValidEmailSyntax(email)) {
       summary.skippedInvalid += 1;
+      continue;
+    }
+
+    if (seenInFile.has(email)) {
+      summary.skippedDuplicate += 1;
+      continue;
+    }
+    seenInFile.add(email);
+
+    const dnsCheck = await checkEmailDomain(email);
+    if (!dnsCheck.valid) {
+      summary.skippedDns += 1;
       continue;
     }
 
