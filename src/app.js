@@ -36,6 +36,14 @@ export function createApp() {
     res.json({ status: 'ok' });
   });
 
+  app.get('/privacy', (_req, res) => {
+    res.sendFile(path.join(publicDir, 'privacy.html'));
+  });
+
+  app.get('/terms', (_req, res) => {
+    res.sendFile(path.join(publicDir, 'terms.html'));
+  });
+
   app.use(routes);
   app.use(notFoundHandler);
   app.use(errorHandler);
