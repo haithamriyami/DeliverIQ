@@ -53,3 +53,13 @@ Only needed if you later buy a domain and want higher volume. Until Gmail is con
 - Template picker, send, and test send
 - Bounce handling and unsubscribe links
 - Live dashboard from Postgres
+
+## Safe sending (throttle, daily cap, replies)
+
+- Pressing Send queues a step. Nothing sends in a long request loop.
+- Each connected Gmail account has `users.next_send_at`. Every send first claims that slot with one atomic `UPDATE ... WHERE next_send_at IS NULL OR next_send_at <= now()`, and moves it 30 to 40 seconds ahead (Settings: gap and jitter). Overlapping ticks cannot double send.
+- Daily cap (default 200) counts `campaign_recipients.sent_at` since midnight Africa/Nairobi for that sender. Over the cap, emails stay queued and resume after midnight.
+- Ticks come from: the open app (`POST /sending/tick` every 10 s, sends only what is due), `GET /cron/send-tick` (Bearer `CRON_SECRET`, keeps sending for up to about 50 s), a daily Vercel Cron, and an optional GitHub Actions schedule (copy `docs/send-tick.workflow.yml` to `.github/workflows/`). On Vercel Pro you can change the cron in `vercel.json` to `* * * * *`.
+- Gmail rate limit, policy, suspension or auth errors pause the sender. A campaign with more than 5% hard bounces after 20 sends pauses itself. Both show a banner with Resume.
+- Inbox sync classifies replies: human replies stop follow-ups, opt outs mark the contact do not contact, auto replies are only counted.
+- Tests: `npm test`. The scheduler integration test runs only with `TEST_DATABASE_URL` pointing at a throwaway database.

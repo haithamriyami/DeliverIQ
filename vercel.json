@@ -5,5 +5,11 @@
     "src/**/*.js": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/cron/send-tick",
+      "schedule": "5 3 * * *"
+    }
+  ]
 }

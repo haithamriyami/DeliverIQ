@@ -5,6 +5,8 @@ import templates from './templates.js';
 import webhooks from './webhooks.js';
 import auth from './auth.js';
 import dashboard from './dashboard.js';
+import sending from './sending.js';
+import * as sendingController from '../controllers/sendingController.js';
 import * as unsubscribeController from '../controllers/unsubscribeController.js';
 import * as trackingController from '../controllers/trackingController.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -17,10 +19,12 @@ router.get('/t/c/:token', trackingController.clickRedirect);
 router.get('/unsubscribe', unsubscribeController.preview);
 router.post('/unsubscribe', ...unsubscribeController.confirm);
 router.use('/webhooks', webhooks);
+router.get('/cron/send-tick', sendingController.cronTick);
 
 router.use('/recipients', requireAuth, recipients);
 router.use('/campaigns', requireAuth, campaigns);
 router.use('/templates', requireAuth, templates);
 router.use('/dashboard', requireAuth, dashboard);
+router.use('/sending', requireAuth, sending);
 
 export default router;

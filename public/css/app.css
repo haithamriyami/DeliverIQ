@@ -1095,3 +1095,10 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 }
+
+.sending-banner { background: #fff4e5; border: 1px solid #f5b971; color: #7a4100; border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
+.sending-banner .banner-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin: 4px 0; }
+.sending-banner strong { display: block; }
+.sending-meter { margin-bottom: 12px; font-size: 13px; }
+.badge.paused { background: #fde2e1; color: #9b1c1c; }
+.badge.queued { background: #e8f0ff; color: #1d4ed8; }
