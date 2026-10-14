@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as campaignsController from '../controllers/campaignsController.js';
+import * as sendingController from '../controllers/sendingController.js';
 
 const router = Router();
 
@@ -8,6 +9,7 @@ router.get('/', campaignsController.list);
 router.post('/sync-bounces', campaignsController.syncBounces);
 router.delete('/:id', ...campaignsController.remove);
 router.post('/:id/send', ...campaignsController.send);
+router.post('/:id/resume', ...sendingController.resumeCampaign);
 router.post('/:id/follow-up', ...campaignsController.followUp);
 router.post('/:id/test', ...campaignsController.testSend);
 router.get('/:id/report', ...campaignsController.report);

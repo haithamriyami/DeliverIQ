@@ -124,11 +124,35 @@ export async function getUserSender(userId) {
   }
 
   return {
+    userId: user.id,
     email: user.gmailEmail,
     refreshToken: decrypt(user.gmailRefreshToken),
     fromDisplayName: user.workspace?.fromDisplayName,
+    userName: user.name,
     replyToEmail: user.workspace?.replyToEmail,
   };
+}
+
+/**
+ * The From display name. Order: explicit value for this send, the Settings value,
+ * the connected user's name, then the mailbox name. Never the product name.
+ */
+export function resolveDisplayName({ fromName, fromDisplayName, userName, email } = {}) {
+  const candidates = [fromName, fromDisplayName, userName];
+  for (const value of candidates) {
+    const clean = String(value || '').replace(/[\r\n<>"]/g, '').trim();
+    if (clean && clean.toLowerCase() !== 'deliveriq') return clean;
+  }
+  return String(email || '').split('@')[0] || '';
+}
+
+function formatFrom(displayName, email) {
+  if (!displayName) return email;
+  // RFC 2047 encode non ASCII names, quote plain ones.
+  if (/[^\x20-\x7e]/.test(displayName)) {
+    return `=?UTF-8?B?${Buffer.from(displayName).toString('base64')}?= <${email}>`;
+  }
+  return `"${displayName.replace(/["\\]/g, '')}" <${email}>`;
 }
 
 export async function getWorkspaceSender(workspaceId) {
@@ -178,8 +202,13 @@ export async function sendViaGmail({
   client.setCredentials({ refresh_token: sender.refreshToken });
 
   const gmail = google.gmail({ version: 'v1', auth: client });
-  const displayName = fromName || sender.fromDisplayName || 'DeliverIQ';
-  const from = `${displayName} <${sender.email}>`;
+  const displayName = resolveDisplayName({
+    fromName,
+    fromDisplayName: sender.fromDisplayName,
+    userName: sender.userName,
+    email: sender.email,
+  });
+  const from = formatFrom(displayName, sender.email);
   const plainText = htmlToPlainText(html);
   const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
   const boundary = `----=_Part_${Date.now()}_${Math.random().toString(36).substring(2)}`;
@@ -409,4 +438,71 @@ export async function listGmailBounceAddresses() {
   }
 
   return [...byEmail.entries()].map(([email, reason]) => ({ email, reason }));
+}
+
+function headerOf(headers, name) {
+  const lower = name.toLowerCase();
+  return headers.find((h) => String(h.name || '').toLowerCase() === lower)?.value || '';
+}
+
+function plainTextOf(payload) {
+  const plain = [];
+  const html = [];
+  (function walk(part) {
+    if (!part) return;
+    if (part.body?.data) {
+      if (part.mimeType === 'text/plain') plain.push(decodeGmailData(part.body.data));
+      else if (part.mimeType === 'text/html') html.push(decodeGmailData(part.body.data));
+    }
+    for (const child of part.parts || []) walk(child);
+  })(payload);
+  if (plain.length) return plain.join('\n');
+  return htmlToPlainText(html.join('\n'));
+}
+
+/**
+ * Recent inbound messages (not from us, not bounce notices) for one connected account.
+ * Returns { id, threadId, fromEmail, subject, body, headers, snippet, receivedAt }.
+ */
+export async function listGmailInboundReplies(userId, { days = 14, max = 100 } = {}) {
+  const sender = await getUserSender(userId);
+  if (!sender) return [];
+
+  const client = createOAuthClient();
+  client.setCredentials({ refresh_token: sender.refreshToken });
+  const gmail = google.gmail({ version: 'v1', auth: client });
+  const senderEmail = String(sender.email || '').toLowerCase();
+
+  const ids = [];
+  let pageToken;
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: 100,
+      q: `newer_than:${days}d -from:me -from:mailer-daemon -from:postmaster -in:chats -in:sent`,
+      pageToken,
+    });
+    for (const item of list.data.messages || []) ids.push(item);
+    pageToken = list.data.nextPageToken || undefined;
+  } while (pageToken && ids.length < max);
+
+  const out = [];
+  for (const item of ids.slice(0, max)) {
+    const message = await gmail.users.messages.get({ userId: 'me', id: item.id, format: 'full' });
+    const headers = message.data.payload?.headers || [];
+    const fromRaw = headerOf(headers, 'From');
+    const fromEmail = (String(fromRaw).toLowerCase().match(EMAIL_RE) || [])[0] || '';
+    if (isNoiseEmail(fromEmail, senderEmail)) continue;
+    out.push({
+      id: message.data.id,
+      threadId: message.data.threadId,
+      fromEmail,
+      subject: headerOf(headers, 'Subject'),
+      body: plainTextOf(message.data.payload),
+      headers,
+      snippet: message.data.snippet || '',
+      receivedAt: message.data.internalDate ? new Date(Number(message.data.internalDate)) : new Date(),
+    });
+  }
+  return out;
 }

@@ -107,9 +107,9 @@ export async function sendCampaignEmail({
     };
   }
 
+  // Display name comes from Settings or the connected user's name (see resolveDisplayName).
   const gmailResult = await sendViaGmail({
     to,
-    fromName: env.sendgrid.fromName,
     subject: renderedSubject,
     html: renderedHtml,
     unsubscribeUrl,

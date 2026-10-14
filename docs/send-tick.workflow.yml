@@ -1,0 +1,22 @@
+# Copy this file to .github/workflows/send-tick.yml to enable it (needs a token with workflow scope, or add it in the GitHub web UI).
+# Backup scheduler for the throttled sender on the Vercel Hobby plan, where Vercel Cron
+# can only run once a day. Each call sends due emails for up to about 50 seconds while
+# keeping the 30 to 40 second gap per Gmail account. Requires repo secret CRON_SECRET
+# (same value as the Vercel env var) and optional repo variable APP_URL.
+name: send-tick
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call send tick
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          APP_URL: ${{ vars.APP_URL || 'https://deliveriq-eosin.vercel.app' }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "CRON_SECRET not set, skipping"; exit 0; fi
+          curl -fsS --max-time 120 -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/cron/send-tick" | head -c 2000

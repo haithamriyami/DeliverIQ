@@ -45,7 +45,7 @@ function showAuthError(message) {
 }
 
 function fmtDate(value) {
-  if (!value) return '—';
+  if (!value) return '-';
   return new Date(value).toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -69,9 +69,12 @@ function pct(n) {
   return `${Math.round((Number(n) || 0) * 1000) / 10}%`;
 }
 
-function statusBadge(status, pending = 0) {
+function statusBadge(status, pending = 0, paused = false) {
+  if (paused) {
+    return '<span class="badge paused">Paused</span>';
+  }
   if (status === 'sending' && pending > 0) {
-    return '<span class="badge sending">Paused</span>';
+    return '<span class="badge queued">Queued</span>';
   }
   const map = {
     completed: ['completed', 'Completed'],
@@ -154,7 +157,7 @@ function setAuthMode(mode, { email = '', workspace = '' } = {}) {
   const titles = {
     login: ['Log in', 'Welcome back to DeliverIQ.', 'Log in'],
     register: setupRequired
-      ? ['Create account', 'You’re first — this account becomes the owner.', 'Create account']
+      ? ['Create account', 'You’re first, so this account becomes the owner.', 'Create account']
       : ['Create account', 'Join the workspace to send and track campaigns.', 'Create account'],
     invite: ['Join workspace', 'Create your password to join the team.', 'Join team'],
   };
@@ -200,8 +203,11 @@ function campaignRow(campaign, { actions = false } = {}) {
   const totals = current.totals || campaign.totals || {};
   const status = current.status || campaign.status;
   const empty = status === 'pending' && !totals.sent && !totals.bounced && !totals.pending;
-  const sendLabel = status === 'sending' || (totals.pending || 0) > 0 ? 'Continue' : 'Send';
-  const showSend = (totals.pending || 0) > 0 || status === 'pending';
+  const paused = Boolean(campaign.paused || campaign.pausedAt);
+  const queued = status === 'sending' && (totals.pending || 0) > 0;
+  const sendLabel = (totals.pending || 0) > 0 && status !== 'pending' ? 'Queue the rest' : 'Send';
+  const showSend = !paused && !queued && ((totals.pending || 0) > 0 || status === 'pending');
+  const rs = campaign.replyStats || { replies: 0, autoReplies: 0, optOuts: 0 };
   const stepId = current.id || '';
   const stepLabel = current.name || 'Email 1';
   const stepLine = (campaign.steps || [])
@@ -209,6 +215,7 @@ function campaignRow(campaign, { actions = false } = {}) {
     .join(' · ');
   const actionHtml = actions
     ? `<td class="row-actions">
+        ${paused ? `<button class="btn btn-primary btn-small" data-resume-campaign="${campaign.id}">Resume</button>` : ''}
         ${showSend ? `<button class="btn btn-primary btn-small" data-send="${campaign.id}" data-step="${stepId}">${sendLabel}</button>` : ''}
         <button class="btn btn-ghost btn-small" data-followup="${campaign.id}" data-followup-name="${escapeHtml(campaign.name)}" data-followup-step="${escapeHtml(stepLabel)}">Follow-up</button>
         ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-step="${stepId}" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
@@ -221,11 +228,12 @@ function campaignRow(campaign, { actions = false } = {}) {
   const listName = campaign.list?.name ? `<span class="muted step-line">${escapeHtml(campaign.list.name)}</span>` : '';
   return `<tr>
     <td>${escapeHtml(campaign.name)}${listName}${stepLine ? `<span class="muted step-line">${stepLine}</span>` : ''}</td>
-    <td>${statusBadge(status, totals.pending || 0)}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent · ${escapeHtml(stepLabel)}</span>` : ` <span class="muted">${escapeHtml(stepLabel)}</span>`}</td>
-    <td>${empty ? '—' : fmtNum(totals.sent)}</td>
-    <td>${empty ? '—' : fmtNum(totals.bounced)}</td>
-    <td>${empty ? '—' : fmtNum(totals.opened)}</td>
-    <td>${empty ? '—' : fmtNum(totals.clicked)}</td>
+    <td>${statusBadge(status, totals.pending || 0, paused)}${paused ? ` <span class="muted step-line">${escapeHtml(campaign.pausedReason || '')}</span>` : ''}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent · ${escapeHtml(stepLabel)}</span>` : ` <span class="muted">${escapeHtml(stepLabel)}</span>`}</td>
+    <td>${empty ? '-' : fmtNum(totals.sent)}</td>
+    <td>${empty ? '-' : fmtNum(totals.bounced)}</td>
+    <td>${empty ? '-' : fmtNum(totals.opened)}</td>
+    <td>${empty ? '-' : fmtNum(totals.clicked)}</td>
+    <td title="Replies / auto replies / opt outs">${fmtNum(rs.replies)} replies<span class="muted step-line">${fmtNum(rs.autoReplies)} auto · ${fmtNum(rs.optOuts)} opt outs</span></td>
     <td>${fmtDate(campaign.scheduledAt)}</td>
     ${actionHtml}
   </tr>`;
@@ -329,7 +337,7 @@ async function loadDashboard() {
 
   document.getElementById('recent-campaigns-body').innerHTML = data.recent.length
     ? data.recent.slice(0, 5).map((c) => campaignRow(c)).join('')
-            : '<tr><td colspan="7" class="empty">No campaigns yet</td></tr>';
+            : '<tr><td colspan="8" class="empty">No campaigns yet</td></tr>';
 
   document.getElementById('upcoming-schedule').innerHTML = data.upcoming.length
     ? data.upcoming
@@ -353,13 +361,13 @@ async function loadCampaigns() {
   const campaigns = await api('/campaigns');
   document.getElementById('campaigns-body').innerHTML = campaigns.length
     ? campaigns.map((c) => campaignRow(c, { actions: true })).join('')
-    : '<tr><td colspan="8" class="empty">No campaigns yet</td></tr>';
+    : '<tr><td colspan="9" class="empty">No campaigns yet</td></tr>';
   document.getElementById('reports-grid').innerHTML = campaigns.length
     ? campaigns
         .map(
           (c) => `<article class="card kpi">
             <div class="kpi-label">${c.name}</div>
-            <div class="kpi-value">${c.status === 'pending' ? '—' : pct(c.rates?.openRate)}</div>
+            <div class="kpi-value">${c.status === 'pending' ? '-' : pct(c.rates?.openRate)}</div>
             <div class="kpi-note">${statusBadge(c.status, c.totals?.pending || 0)} · ${fmtNum(c.totals?.bounced || 0)} bounced · ${fmtNum(c.totals?.pending || 0)} not sent</div>
           </article>`
         )
@@ -430,9 +438,9 @@ async function loadRecipients() {
             </td>
             <td>${escapeHtml((r.inCampaigns || []).map((c) => c.name).join(', ') || 'Not in a campaign')}</td>
             <td>${escapeHtml(r.timezone)}</td>
-            <td>${escapeHtml(r.notes || '—')}</td>
+            <td>${escapeHtml(r.notes || '-')}</td>
             <td><span class="status-dot ${r.status}"></span>${r.status}</td>
-            <td>${escapeHtml(r.lastError || '—')}</td>
+            <td>${escapeHtml(r.lastError || '-')}</td>
             <td class="row-actions">
               <button class="btn btn-danger btn-small" data-delete-recipient="${r.id}">Delete</button>
             </td>
@@ -593,6 +601,7 @@ async function loadPageData(page) {
     if (page === 'campaigns' || page === 'reports') {
       await loadCampaigns();
       syncGmailBounces({ quiet: true });
+      syncGmailReplies().then((r) => { if (r && (r.replies || r.optOuts || r.autoReplies)) loadCampaigns(); });
     }
     if (page === 'recipients' || page === 'new-campaign') {
       await loadRecipients();
@@ -600,7 +609,11 @@ async function loadPageData(page) {
       if (page === 'recipients') syncGmailBounces({ quiet: true });
     }
     if (page === 'templates') await loadTemplates();
-    if (page === 'settings') await loadSettings();
+    if (page === 'settings') {
+      await loadSettings();
+      await loadSendingSettings();
+    }
+    loadSendingStatus();
   } catch (err) {
     if (String(err.message).includes('log in')) {
       if (!currentUser) lockApp();
@@ -618,35 +631,195 @@ document.addEventListener('click', (event) => {
 
 async function sendCampaignBatches(campaignId, stepId) {
   sendingCampaignId = campaignId;
-  let remaining = 1;
-  let totalSent = 0;
-  let totalFailed = 0;
   try {
-    while (remaining > 0) {
-      const result = await api(`/campaigns/${campaignId}/send`, {
-        method: 'POST',
-        body: JSON.stringify(stepId ? { stepId } : {}),
-      });
-      totalSent += result.enqueued || 0;
-      totalFailed += result.failed || 0;
-      remaining = result.remaining || 0;
-      showToast(
-        remaining
-          ? `Sent ${totalSent}. ${remaining} not sent…`
-          : `Finished: ${totalSent} sent${totalFailed ? `, ${totalFailed} bounced` : ''}`
-      );
-      await loadCampaigns();
-      await loadDashboard();
+    const result = await api(`/campaigns/${campaignId}/send`, {
+      method: 'POST',
+      body: JSON.stringify(stepId ? { stepId } : {}),
+    });
+    if (result.paused) {
+      showToast(result.pausedReason || 'This campaign is paused. Press Resume first.');
+    } else if (result.remaining) {
+      showToast(`Queued ${fmtNum(result.remaining)}. DeliverIQ sends one email every 30 to 40 seconds, up to the daily limit.`);
+    } else {
+      showToast(`Done: ${fmtNum(result.enqueued)} sent${result.failed ? `, ${fmtNum(result.failed)} bounced` : ''}`);
     }
-    try {
-      await syncGmailBounces({ quiet: true });
-    } catch {
-      // Bounce inbox may need reconnect; send result already shown.
-    }
+    await loadCampaigns();
+    await loadSendingStatus();
   } finally {
     sendingCampaignId = null;
   }
 }
+
+let sendingStatusCache = null;
+let tickTimer = null;
+let tickBusy = false;
+
+function fmtTime(value) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+async function loadSendingStatus() {
+  if (!currentUser) return null;
+  let status;
+  try {
+    status = await api('/sending/status');
+  } catch {
+    return null;
+  }
+  sendingStatusCache = status;
+  const banner = document.getElementById('sending-banner');
+  const meter = document.getElementById('sending-meter');
+  const rows = [];
+  for (const sender of status.senders || []) {
+    if (sender.paused) {
+      rows.push(`<div class="banner-row"><div><strong>Sending paused for ${escapeHtml(sender.email)}</strong>${escapeHtml(sender.pausedReason || '')}</div>
+        <button class="btn btn-primary btn-small" data-resume-sender="${sender.userId}">Resume</button></div>`);
+    }
+  }
+  for (const campaign of status.pausedCampaigns || []) {
+    rows.push(`<div class="banner-row"><div><strong>Campaign paused: ${escapeHtml(campaign.name)}</strong>${escapeHtml(campaign.pausedReason || '')}</div>
+      <button class="btn btn-primary btn-small" data-resume-campaign="${campaign.id}">Resume</button></div>`);
+  }
+  if (banner) {
+    banner.innerHTML = rows.join('');
+    banner.hidden = rows.length === 0;
+  }
+  if (meter) {
+    const parts = (status.senders || []).map((sender) => {
+      const base = `${escapeHtml(sender.email)}: ${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today, ${fmtNum(sender.queued)} queued`;
+      if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time`;
+      return base;
+    });
+    meter.innerHTML = parts.join('<br>');
+    meter.hidden = parts.length === 0;
+  }
+  const accounts = document.getElementById('sending-accounts');
+  if (accounts) {
+    accounts.innerHTML = (status.senders || []).length
+      ? status.senders
+          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today · ${fmtNum(sender.queued)} queued${sender.paused ? ' · paused' : ''}</span></div>`)
+          .join('')
+      : '<p class="muted">No Gmail account connected yet.</p>';
+  }
+  scheduleTicks(status);
+  return status;
+}
+
+/**
+ * While the app is open and something is queued, nudge the server every 10 seconds.
+ * The server decides whether an email is due, so the gap and daily cap always hold.
+ * When the app is closed, the cron tick keeps sending.
+ */
+function scheduleTicks(status) {
+  const busy = (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
+  if (busy && !tickTimer) {
+    tickTimer = setInterval(async () => {
+      if (tickBusy || document.hidden) return;
+      tickBusy = true;
+      try {
+        const result = await api('/sending/tick', { method: 'POST' });
+        const fresh = await loadSendingStatus();
+        if (result.sent && currentPage() === 'campaigns') await loadCampaigns();
+        if (!fresh) clearTickTimer();
+      } catch {
+        // Try again next interval.
+      } finally {
+        tickBusy = false;
+      }
+    }, 10000);
+  } else if (!busy) {
+    clearTickTimer();
+  }
+}
+
+function clearTickTimer() {
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+}
+
+async function syncGmailReplies() {
+  try {
+    const result = await api('/sending/sync-replies', { method: 'POST' });
+    if (result.replies || result.optOuts) {
+      showToast(`Found ${fmtNum(result.replies)} replies and ${fmtNum(result.optOuts)} opt outs. Follow-ups to them are stopped.`);
+    }
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+async function loadSendingSettings() {
+  const form = document.getElementById('sending-settings-form');
+  if (!form) return;
+  const settings = await api('/sending/settings');
+  form.fromDisplayName.value = settings.fromDisplayName || '';
+  form.fromDisplayName.placeholder = settings.defaultDisplayName || 'Your name or company';
+  form.replyToEmail.value = settings.replyToEmail || '';
+  form.sendGapSeconds.value = settings.sendGapSeconds;
+  form.sendJitterSeconds.value = settings.sendJitterSeconds;
+  form.dailySendCap.value = settings.dailySendCap;
+  const help = document.getElementById('s-from-name-help');
+  if (help) {
+    help.textContent = settings.fromDisplayName
+      ? `Emails show as from "${settings.fromDisplayName}".`
+      : `Empty, so emails show as from "${settings.defaultDisplayName}". Type a name to change it.`;
+  }
+  const owner = currentUser?.role === 'owner';
+  form.querySelectorAll('input, button').forEach((el) => { el.disabled = !owner; });
+}
+
+document.getElementById('sending-settings-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api('/sending/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        fromDisplayName: form.fromDisplayName.value.trim(),
+        replyToEmail: form.replyToEmail.value.trim(),
+        sendGapSeconds: Number(form.sendGapSeconds.value),
+        sendJitterSeconds: Number(form.sendJitterSeconds.value),
+        dailySendCap: Number(form.dailySendCap.value),
+      }),
+    });
+    showToast('Sending settings saved');
+    await loadSendingSettings();
+    await loadSendingStatus();
+  } catch (err) {
+    showToast(err.message);
+  }
+});
+
+document.addEventListener('click', async (event) => {
+  const resumeSender = event.target.closest('[data-resume-sender]');
+  const resumeCampaign = event.target.closest('[data-resume-campaign]');
+  try {
+    if (resumeSender) {
+      if (!confirm('Resume sending from this Gmail account? Only do this after checking the account is in good standing.')) return;
+      await api('/sending/resume', { method: 'POST', body: JSON.stringify({ userId: resumeSender.dataset.resumeSender }) });
+      showToast('Sending resumed');
+      await loadSendingStatus();
+    }
+    if (resumeCampaign) {
+      if (!confirm('Resume this campaign? Bounced contacts are skipped.')) return;
+      await api(`/campaigns/${resumeCampaign.dataset.resumeCampaign}/resume`, { method: 'POST' });
+      showToast('Campaign resumed');
+      await loadSendingStatus();
+      if (currentPage() === 'campaigns') await loadCampaigns();
+    }
+  } catch (err) {
+    showToast(err.message);
+  }
+});
 
 function closeFollowUpModal() {
   const modal = document.getElementById('followup-modal');
@@ -657,7 +830,7 @@ async function openFollowUpModal(campaignId, campaignName, currentStepName) {
   await loadTemplates();
   document.getElementById('followup-campaign-id').value = campaignId;
   document.getElementById('followup-help').textContent =
-    `This stays on “${campaignName}”. You do not pick people again. ${currentStepName || 'Email 1'} stays as-is — choose the next template, like Welcome back or Should I close this out.`;
+    `This stays on “${campaignName}”. You do not pick people again. ${currentStepName || 'Email 1'} stays as-is. Choose the next template, like Welcome back or Should I close this out.`;
   document.getElementById('followup-subject').value = '';
   document.getElementById('followup-modal').hidden = false;
   document.getElementById('followup-subject').focus();
@@ -674,7 +847,7 @@ async function showCampaignAudience(campaignId, name, kind, stepId) {
     ? rows
         .map((row) => {
           const status = row.status || (kind === 'bounced' ? 'bounced' : kind === 'pending' ? 'pending' : 'sent');
-          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : kind === 'pending' ? 'Waiting — click Continue to send' : status;
+          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : kind === 'pending' ? 'Queued. Sends automatically, one email every 30 to 40 seconds' : status;
           return `<tr>
             <td>${escapeHtml(row.recipient?.name || '')}</td>
             <td>${escapeHtml(row.recipient?.email || '')}</td>
@@ -734,8 +907,7 @@ document.addEventListener('click', async (event) => {
         showToast('A send is already running');
         return;
       }
-      const resume = sendBtn.textContent.trim() === 'Continue';
-      if (!resume && !confirm('Send this email to eligible people on this campaign now? Bounced contacts are skipped.')) return;
+      if (!confirm('Queue this email for eligible people on this campaign? It goes out one at a time with a 30 to 40 second gap, up to the daily limit. Bounced, replied and opted out contacts are skipped.')) return;
       await sendCampaignBatches(sendBtn.dataset.send, sendBtn.dataset.step);
     }
     const followBtn = event.target.closest('[data-followup]');
@@ -1165,7 +1337,7 @@ document.getElementById('invite-form').addEventListener('submit', async (event) 
       body: JSON.stringify({ email: event.currentTarget.email.value.trim() }),
     });
     document.getElementById('invite-result').innerHTML = `<div class="invite-url">Invite link: ${invite.inviteUrl}</div>`;
-    showToast('Invite created — send this link to your partner');
+    showToast('Invite created. Send this link to your partner');
     event.currentTarget.reset();
     await loadSettings();
   } catch (err) {

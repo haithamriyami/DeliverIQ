@@ -3,14 +3,34 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { campaignQueue, sendJobId } from '../queues/campaignQueue.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
 import { env } from '../config/env.js';
-import { listGmailBounceAddresses } from './gmailService.js';
+import { listGmailBounceAddresses, listGmailInboundReplies } from './gmailService.js';
 import { campaignAssignmentsForRecipients } from './recipientService.js';
+import {
+  runSendTick,
+  checkCampaignBounceRate,
+  resolveSenderUser,
+  claimSendSlot,
+  workspaceSendSettings,
+  sentTodayCount,
+} from './sendScheduler.js';
+import { classifyReply } from '../utils/replyClassifier.js';
+import { sendDecision } from '../utils/throttle.js';
 
-const SEND_BATCH_SIZE = 8;
-const SEND_GAP_MS = 1500;
+function isSendable(recipient, step) {
+  if (!recipient || recipient.status !== 'active' || recipient.doNotContact) return false;
+  if (step && step.stepNumber > 1 && recipient.repliedAt) return false;
+  return true;
+}
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Run one throttled scheduler tick. budgetMs is how long this invocation may keep
+ * waiting for the next 30 to 40 second slot (0 means send only what is due right now).
+ */
+export async function runSchedulerTick({ budgetMs = 0 } = {}) {
+  return runSendTick({
+    budgetMs,
+    hooks: { recordSend, recordBounce, maybeCompleteCampaign },
+  });
 }
 
 function stepNameFor(stepNumber) {
@@ -249,6 +269,7 @@ export async function enqueueCampaign(campaignId, stepId) {
   };
 
   const toSend = [];
+  const skippedReplied = { count: 0 };
 
   for (const recipient of recipients) {
     if (alreadyProcessedIds.has(recipient.id)) {
@@ -256,13 +277,17 @@ export async function enqueueCampaign(campaignId, stepId) {
       continue;
     }
 
-    if (recipient.status === 'bounced' || recipient.status === 'unsubscribed') {
+    if (!isSendable(recipient, step)) {
+      if (recipient.status === 'active' && !recipient.doNotContact && recipient.repliedAt) {
+        skippedReplied.count += 1;
+      }
       skipped.inactive += 1;
       continue;
     }
 
     toSend.push(recipient);
   }
+  skipped.replied = skippedReplied.count;
 
   if (toSend.length === 0) {
     const completed = await maybeCompleteCampaign(campaignId, step.id);
@@ -272,11 +297,14 @@ export async function enqueueCampaign(campaignId, stepId) {
       enqueued: 0,
       failed: 0,
       remaining: 0,
+      queued: 0,
       skipped,
       errors: [],
     };
   }
 
+  // Queue the step. The throttled scheduler (cron tick, or the open app) sends one
+  // email per Gmail account every 30 to 40 seconds, up to the daily cap.
   await prisma.$transaction([
     prisma.campaign.update({
       where: { id: campaignId },
@@ -288,63 +316,17 @@ export async function enqueueCampaign(campaignId, stepId) {
     }),
   ]);
 
-  const batch = toSend.slice(0, SEND_BATCH_SIZE);
-  let enqueued = 0;
-  let failed = 0;
-  const errors = [];
-
-  for (const [index, recipient] of batch.entries()) {
-    if (index > 0) {
-      await sleep(SEND_GAP_MS);
-    }
-    try {
-      const sendResult = await sendCampaignEmail({
-        to: recipient.email,
-        name: recipient.name,
-        subject: step.subject,
-        html: template.body,
-        campaignId: campaign.id,
-        recipientId: recipient.id,
-        stepId: step.id,
-        unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
-        userId: campaign.createdById,
-      });
-      await recordSend({ 
-        campaignId: campaign.id, 
-        recipientId: recipient.id, 
-        stepId: step.id,
-        messageId: sendResult?.messageId,
-        threadId: sendResult?.threadId,
-      });
-      enqueued += 1;
-    } catch (err) {
-      failed += 1;
-      const message = String(err.message || '').toLowerCase();
-      const isAuthError = /invalid.*credentials|insufficient|permission|unauthorized|forbidden|gmail.*not.*connected|connect.*gmail|401|403/.test(message);
-      const isRateLimit = /rate.*limit|too.*many.*requests|quota|429/.test(message);
-      
-      if (isAuthError) {
-        errors.push({ email: recipient.email, error: 'Gmail not connected or permission denied. Reconnect Gmail in Settings.' });
-        console.error(`[send] Auth error for ${recipient.email}: ${err.message}`);
-      } else if (isRateLimit) {
-        errors.push({ email: recipient.email, error: 'Rate limit reached. Try again later.' });
-        console.error(`[send] Rate limit for ${recipient.email}: ${err.message}`);
-      } else {
-        errors.push({ email: recipient.email, error: err.message });
-        console.error(`[send] ${recipient.email}`, err.message);
-        await recordBounce({
-          campaignId: campaign.id,
-          recipientId: recipient.id,
-          stepId: step.id,
-          error: err.message,
-        });
-      }
-    }
-  }
+  const tick = await runSchedulerTick({ budgetMs: 0 });
+  const mine = tick.results.filter((row) => row.campaignId === campaignId || row.reason === 'sender_paused');
+  const enqueued = mine.filter((row) => row.sent).length;
+  const failed = mine.filter((row) => row.reason === 'bounced').length;
+  const errors = mine
+    .filter((row) => row.error)
+    .map((row) => ({ email: row.email || row.sender, error: row.error }));
 
   await maybeCompleteCampaign(campaignId, step.id);
   const updated = await getCampaignById(campaignId);
-  const remaining = Math.max(0, toSend.length - batch.length);
+  const remaining = await livePendingCount(updated, step);
 
   return {
     campaign: updated,
@@ -352,6 +334,7 @@ export async function enqueueCampaign(campaignId, stepId) {
     enqueued,
     failed,
     remaining,
+    queued: remaining,
     skipped,
     errors,
   };
@@ -377,7 +360,10 @@ export async function createFollowUp({ campaignId, subject, templateId, audience
   const livePeople = await prisma.recipient.findMany({
     where: { id: { in: campaign.recipientIds } },
   });
-  const activePeople = livePeople.filter((person) => person.status === 'active');
+  // People who replied (or opted out) never get another follow-up.
+  const activePeople = livePeople.filter(
+    (person) => person.status === 'active' && !person.doNotContact && !person.repliedAt
+  );
 
   let recipientIds;
   if (audience === 'delivered') {
@@ -397,7 +383,7 @@ export async function createFollowUp({ campaignId, subject, templateId, audience
   if (recipientIds.length === 0) {
     throw new HttpError(
       400,
-      'Nobody left for this follow-up. Bounced, delayed, and removed contacts are skipped.'
+      'Nobody left for this follow-up. Bounced, replied, opted out, and removed contacts are skipped.'
     );
   }
 
@@ -524,7 +510,7 @@ const STATUS_RANK = {
   bounced: 4,
 };
 
-export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId }) {
+export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId, senderId }) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: { orderBy: { stepNumber: 'asc' } } },
@@ -552,6 +538,7 @@ export async function recordSend({ campaignId, recipientId, stepId, messageId, t
         sentAt: new Date(),
         messageId: messageId || null,
         threadId: threadId || null,
+        senderId: senderId || null,
       },
     });
   }
@@ -566,11 +553,12 @@ export async function recordSend({ campaignId, recipientId, stepId, messageId, t
       status: keepStatus,
       messageId: messageId || existing.messageId,
       threadId: threadId || existing.threadId,
+      senderId: senderId || existing.senderId,
     },
   });
 }
 
-export async function recordBounce({ campaignId, recipientId, error, stepId }) {
+export async function recordBounce({ campaignId, recipientId, error, stepId, senderId }) {
   const reason = String(error || 'Bounced').slice(0, 500);
 
   await prisma.recipient.update({
@@ -604,6 +592,7 @@ export async function recordBounce({ campaignId, recipientId, error, stepId }) {
           status: 'bounced',
           error: reason,
           sentAt: new Date(),
+          senderId: senderId || null,
         },
       });
     }
@@ -648,10 +637,10 @@ export async function listCampaignAudience(campaignId, kind = 'sent', stepId) {
       orderBy: { email: 'asc' },
     });
     return people
-      .filter((person) => !processedIds.has(person.id))
+      .filter((person) => !processedIds.has(person.id) && isSendable(person, step))
       .map((person) => ({
         status: 'pending',
-        error: 'Not sent yet',
+        error: 'Queued',
         recipient: {
           id: person.id,
           email: person.email,
@@ -694,6 +683,7 @@ export async function syncBouncesFromGmail() {
   });
 
   const emails = [];
+  const touchedCampaigns = new Set();
   for (const recipient of recipients) {
     const reason =
       byEmail.get(recipient.email) ||
@@ -724,6 +714,11 @@ export async function syncBouncesFromGmail() {
     }
 
     emails.push(recipient.email);
+    if (latestSent) touchedCampaigns.add(latestSent.campaignId);
+  }
+
+  for (const campaignId of touchedCampaigns) {
+    await checkCampaignBounceRate(campaignId);
   }
 
   return { scanned: notices.length, marked: emails.length, emails };
@@ -815,7 +810,7 @@ export async function listCampaignsWithStats() {
     ...campaign.recipientIds,
     ...campaign.steps.flatMap((step) => step.recipientIds),
   ]))];
-  const [grouped, rows, people] = await Promise.all([
+  const [grouped, rows, people, replyGroups] = await Promise.all([
     prisma.campaignRecipient.groupBy({
       by: ['stepId', 'status'],
       _count: { _all: true },
@@ -826,9 +821,25 @@ export async function listCampaignsWithStats() {
     }),
     prisma.recipient.findMany({
       where: { id: { in: allAudienceIds } },
-      select: { id: true, status: true },
+      select: { id: true, status: true, doNotContact: true, repliedAt: true },
+    }),
+    prisma.inboundReply.groupBy({
+      by: ['campaignId', 'type'],
+      where: { campaignId: { in: campaignIds } },
+      _count: { _all: true },
     }),
   ]);
+
+  const repliesByCampaign = new Map();
+  for (const row of replyGroups) {
+    if (!repliesByCampaign.has(row.campaignId)) {
+      repliesByCampaign.set(row.campaignId, { replies: 0, autoReplies: 0, optOuts: 0 });
+    }
+    const bucket = repliesByCampaign.get(row.campaignId);
+    if (row.type === 'reply') bucket.replies += row._count._all;
+    if (row.type === 'auto_reply') bucket.autoReplies += row._count._all;
+    if (row.type === 'opt_out') bucket.optOuts += row._count._all;
+  }
 
   const byStep = new Map();
   for (const row of grouped) {
@@ -873,7 +884,7 @@ export async function listCampaignsWithStats() {
         const processed = processedByStep.get(step.id) || new Set();
         const pending = audience.filter((id) => {
           const person = peopleById.get(id);
-          return person?.status === 'active' && !processed.has(id);
+          return isSendable(person, step) && !processed.has(id);
         }).length;
 
         if (pending === 0 && step.status === 'sending') {
@@ -915,6 +926,8 @@ export async function listCampaignsWithStats() {
 
       return {
         ...campaign,
+        paused: Boolean(campaign.pausedAt),
+        replyStats: repliesByCampaign.get(campaign.id) || { replies: 0, autoReplies: 0, optOuts: 0 },
         currentStep,
         steps: stepSummaries,
         totals: currentStep?.totals || {
@@ -940,7 +953,7 @@ async function livePendingCount(campaign, step) {
   const [existing, processed] = await Promise.all([
     prisma.recipient.findMany({
       where: { id: { in: audienceIds } },
-      select: { id: true, status: true },
+      select: { id: true, status: true, doNotContact: true, repliedAt: true },
     }),
     prisma.campaignRecipient.findMany({
       where: { stepId: step.id },
@@ -948,7 +961,7 @@ async function livePendingCount(campaign, step) {
     }),
   ]);
   const processedIds = new Set(processed.map((row) => row.recipientId));
-  return existing.filter((row) => row.status === 'active' && !processedIds.has(row.id)).length;
+  return existing.filter((row) => isSendable(row, step) && !processedIds.has(row.id)).length;
 }
 
 export async function getDashboard() {
@@ -1019,6 +1032,27 @@ export async function sendTestEmail({ campaignId, to }) {
   const step = await resolveSendStep(campaign);
   const template = step.template || campaign.template;
 
+  // Test sends use the same Gmail account, so they respect the same gap and daily cap.
+  const sender = await resolveSenderUser(campaign.createdById);
+  if (sender) {
+    const settings = await workspaceSendSettings();
+    const decision = sendDecision({
+      now: new Date(),
+      nextSendAt: sender.nextSendAt,
+      sentToday: await sentTodayCount(sender.id),
+      settings,
+      pausedAt: sender.sendingPausedAt,
+    });
+    if (!decision.ok || !(await claimSendSlot(sender.id, settings))) {
+      const why = decision.reason === 'paused'
+        ? 'Sending from this Gmail account is paused. Resume it first.'
+        : decision.reason === 'daily_cap'
+          ? 'The daily limit for this Gmail account is reached. Try again tomorrow.'
+          : 'Gmail needs at least 30 seconds between emails. Try the test again in a moment.';
+      throw new HttpError(429, why);
+    }
+  }
+
   return sendCampaignEmail({
     to,
     name: 'there',
@@ -1028,5 +1062,87 @@ export async function sendTestEmail({ campaignId, to }) {
     recipientId: 'test',
     stepId: step.id,
     unsubscribeUrl: `${env.appUrl}/unsubscribe.html`,
+    userId: sender?.id || campaign.createdById,
   });
+}
+
+/**
+ * Read recent inbox messages for every connected Gmail account, match them to campaign
+ * sends (thread id first, then sender address), classify, and store them.
+ * Human replies stop follow-ups; opt outs also mark the contact do not contact;
+ * auto replies are only counted.
+ */
+export async function syncRepliesFromGmail({ classify = classifyReply } = {}) {
+  const senders = await prisma.user.findMany({ where: { gmailRefreshToken: { not: null } } });
+  const summary = { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0 };
+
+  for (const sender of senders) {
+    let messages;
+    try {
+      messages = await listGmailInboundReplies(sender.id);
+    } catch (err) {
+      console.error(`[replies] ${sender.gmailEmail}: ${err.message}`);
+      continue;
+    }
+    await prisma.user.update({ where: { id: sender.id }, data: { lastInboxSyncAt: new Date() } });
+
+    for (const message of messages) {
+      summary.scanned += 1;
+      const seen = await prisma.inboundReply.findUnique({ where: { gmailMessageId: message.id } });
+      if (seen) continue;
+
+      let send = message.threadId
+        ? await prisma.campaignRecipient.findFirst({
+            where: { threadId: message.threadId },
+            orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
+            include: { recipient: true },
+          })
+        : null;
+      if (!send && message.fromEmail) {
+        send = await prisma.campaignRecipient.findFirst({
+          where: { recipient: { email: message.fromEmail } },
+          orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
+          include: { recipient: true },
+        });
+      }
+      if (!send) continue;
+      // Ignore anything older than our first email to this person in this thread.
+      if (send.sentAt && message.receivedAt && message.receivedAt < send.sentAt) continue;
+
+      const type = classify({ subject: message.subject, body: message.body, headers: message.headers });
+      await prisma.inboundReply.create({
+        data: {
+          gmailMessageId: message.id,
+          threadId: message.threadId || null,
+          type,
+          senderId: sender.id,
+          recipientId: send.recipientId,
+          campaignId: send.campaignId,
+          subject: String(message.subject || '').slice(0, 300),
+          snippet: String(message.snippet || '').slice(0, 500),
+          receivedAt: message.receivedAt || new Date(),
+        },
+      });
+
+      if (type === 'auto_reply') {
+        summary.autoReplies += 1;
+        continue;
+      }
+
+      const data = { repliedAt: send.recipient.repliedAt || message.receivedAt || new Date() };
+      if (type === 'opt_out') {
+        summary.optOuts += 1;
+        Object.assign(data, {
+          doNotContact: true,
+          status: send.recipient.status === 'bounced' ? 'bounced' : 'unsubscribed',
+          lastError: 'Asked not to be contacted (reply)',
+        });
+      } else {
+        summary.replies += 1;
+      }
+      await prisma.recipient.update({ where: { id: send.recipientId }, data });
+    }
+  }
+
+  return summary;
 }

@@ -1,111 +1,49 @@
 import { Worker } from 'bullmq';
-import { prisma } from '../../lib/prisma.js';
 import { redisConnection } from '../../config/redis.js';
 import { CAMPAIGN_QUEUE_NAME } from '../campaignQueue.js';
-import { sendCampaignEmail, unsubscribeUrlFor } from '../../services/emailService.js';
-import { maybeCompleteCampaign, recordBounce, recordSend } from '../../services/campaignService.js';
+import { runSchedulerTick } from '../../services/campaignService.js';
 
+const LOOP_MS = 5000;
+
+/**
+ * Long running hosts (local dev, Render) call the same throttled tick on an interval.
+ * The per sender slot in Postgres keeps the 30 to 40 second gap and daily cap,
+ * even if a Vercel cron tick runs at the same time.
+ */
+export function startSendLoop() {
+  let running = false;
+  const timer = setInterval(async () => {
+    if (running) return;
+    running = true;
+    try {
+      await runSchedulerTick({ budgetMs: 0 });
+    } catch (err) {
+      console.error('[send-loop]', err.message);
+    } finally {
+      running = false;
+    }
+  }, LOOP_MS);
+  return { close: () => clearInterval(timer) };
+}
+
+/**
+ * Legacy BullMQ worker. Old jobs no longer send directly: any job just runs one
+ * throttled tick so nothing can bypass the gap or daily cap.
+ */
 export function createCampaignWorker() {
   const worker = new Worker(
     CAMPAIGN_QUEUE_NAME,
-    async (job) => {
-      const { campaignId, recipientId, stepId } = job.data;
-
-      const [campaign, recipient, step] = await Promise.all([
-        prisma.campaign.findUnique({
-          where: { id: campaignId },
-          include: { 
-            template: true, 
-            steps: { orderBy: { stepNumber: 'asc' } },
-            createdBy: { select: { id: true } },
-          },
-        }),
-        prisma.recipient.findUnique({ where: { id: recipientId } }),
-        stepId
-          ? prisma.campaignStep.findUnique({ where: { id: stepId }, include: { template: true } })
-          : Promise.resolve(null),
-      ]);
-
-      if (!campaign) {
-        throw new Error(`Campaign ${campaignId} not found`);
-      }
-
-      if (!recipient) {
-        return { skipped: true, reason: 'recipient_missing' };
-      }
-
-      if (recipient.status === 'bounced' || recipient.status === 'unsubscribed') {
-        return { skipped: true, reason: 'inactive_recipient' };
-      }
-
-      const activeStep = step || campaign.steps[campaign.steps.length - 1];
-      if (!activeStep) {
-        throw new Error(`Campaign ${campaignId} has no email to send`);
-      }
-
-      const alreadySent = await prisma.campaignRecipient.findFirst({
-        where: {
-          stepId: activeStep.id,
-          recipientId,
-          status: { in: ['sent', 'opened', 'clicked'] },
-        },
-      });
-
-      if (alreadySent) {
-        return { skipped: true, reason: 'already_sent' };
-      }
-
-      let sendResult;
-      try {
-        sendResult = await sendCampaignEmail({
-          to: recipient.email,
-          name: recipient.name,
-          subject: activeStep.subject,
-          html: (activeStep.template || campaign.template).body,
-          campaignId,
-          recipientId,
-          stepId: activeStep.id,
-          unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
-          userId: campaign.createdBy?.id,
-        });
-      } catch (err) {
-        const message = String(err.message || '').toLowerCase();
-        const isAuthError = /invalid.*credentials|insufficient|permission|unauthorized|forbidden|gmail.*not.*connected|connect.*gmail|401|403/.test(message);
-        const isRateLimit = /rate.*limit|too.*many.*requests|quota|429/.test(message);
-        
-        if (isAuthError || isRateLimit) {
-          console.error(`[worker] Send failed (${isAuthError ? 'auth' : 'rate limit'}): ${err.message}`);
-          throw err;
-        }
-        
-        await recordBounce({ campaignId, recipientId, stepId: activeStep.id, error: err.message });
-        throw err;
-      }
-
-      await recordSend({ 
-        campaignId, 
-        recipientId, 
-        stepId: activeStep.id,
-        messageId: sendResult?.messageId,
-        threadId: sendResult?.threadId,
-      });
-      await maybeCompleteCampaign(campaignId, activeStep.id);
-
-      return { skipped: false, recipientId, campaignId, stepId: activeStep.id };
-    },
-    {
-      connection: redisConnection,
-      concurrency: 10,
-    }
+    async () => runSchedulerTick({ budgetMs: 0 }),
+    { connection: redisConnection, concurrency: 1 }
   );
-
-  worker.on('completed', (job, result) => {
-    console.log(`[worker] job ${job.id} completed`, result);
-  });
-
   worker.on('failed', (job, err) => {
     console.error(`[worker] job ${job?.id} failed`, err.message);
   });
-
+  const loop = startSendLoop();
+  const close = worker.close.bind(worker);
+  worker.close = async () => {
+    loop.close();
+    return close();
+  };
   return worker;
 }

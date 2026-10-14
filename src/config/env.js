@@ -46,7 +46,7 @@ export const env = {
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? 'placeholder-sendgrid-api-key',
     fromEmail: process.env.SENDGRID_FROM_EMAIL ?? 'hello@deliveriq.local',
-    fromName: process.env.SENDGRID_FROM_NAME ?? 'DeliverIQ',
+    fromName: process.env.SENDGRID_FROM_NAME ?? '',
     webhookVerificationKey: process.env.SENDGRID_WEBHOOK_VERIFICATION_KEY ?? '',
     dryRun: (process.env.SENDGRID_DRY_RUN ?? 'true') === 'true',
   },
@@ -55,4 +55,6 @@ export const env = {
     clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? '',
     redirectUri: `${appUrl}/auth/google/callback`,
   },
+  // Vercel Cron sends "Authorization: Bearer $CRON_SECRET" automatically when set.
+  cronSecret: process.env.CRON_SECRET ?? '',
 };

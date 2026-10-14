@@ -145,6 +145,8 @@
         </aside>
 
         <main class="main">
+          <div id="sending-banner" class="sending-banner" hidden></div>
+          <div id="sending-meter" class="sending-meter muted" hidden></div>
           <section id="page-dashboard" class="page active">
             <div class="kpis">
               <article class="card kpi">
@@ -184,11 +186,12 @@
                         <th>Bounced</th>
                         <th>Opens</th>
                         <th>Clicks</th>
+                        <th>Replies</th>
                         <th>Date</th>
                       </tr>
                     </thead>
                     <tbody id="recent-campaigns-body">
-                      <tr><td colspan="7" class="empty">No campaigns yet</td></tr>
+                      <tr><td colspan="8" class="empty">No campaigns yet</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -242,6 +245,7 @@
                       <th>Bounced</th>
                       <th>Opens</th>
                       <th>Clicks</th>
+                      <th>Replies</th>
                       <th>Date</th>
                       <th></th>
                     </tr>
@@ -301,7 +305,7 @@
               </article>
               <article class="card kpi">
                 <div class="kpi-label">Delivery quality</div>
-                <div class="kpi-value" id="analytics-quality">—</div>
+                <div class="kpi-value" id="analytics-quality">-</div>
                 <div class="kpi-note" id="analytics-quality-note">Based on bounce rate</div>
               </article>
             </div>
@@ -405,9 +409,40 @@
                 <p class="muted" id="gmail-status">Checking Gmail…</p>
                 <div id="gmail-actions" style="margin: 10px 0 16px"></div>
                 <p class="muted" id="sendgrid-status">Checking SendGrid…</p>
-                <p class="muted">No domain needed. Connect Gmail to send as your Google address (free, ~500/day). SendGrid is optional later.</p>
+                <p class="muted">No domain needed. Connect Gmail to send as your Google address. DeliverIQ sends slowly on purpose to protect the account: one email at a time with a pause between each, and a daily limit per Gmail account.</p>
                 <p class="muted">If Gmail says it will retry a bounced address for 45 hours, that retry is inside Gmail. DeliverIQ cannot stop it. Check Gmail bounces, remove those contacts, and they will not get a follow-up from this app.</p>
               </div>
+            </article>
+            <article class="card settings-card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>Sender and safe sending</h2></div>
+              <div class="team-list" id="sending-accounts"></div>
+              <form id="sending-settings-form" class="form-grid">
+                <div class="field">
+                  <label for="s-from-name">From name people see</label>
+                  <input id="s-from-name" name="fromDisplayName" maxlength="80" placeholder="Your name or company" />
+                  <p class="muted" id="s-from-name-help">Leave empty to use your account name.</p>
+                </div>
+                <div class="field">
+                  <label for="s-reply-to">Reply-To address (optional)</label>
+                  <input id="s-reply-to" name="replyToEmail" type="email" placeholder="you@example.com" />
+                </div>
+                <div class="field">
+                  <label for="s-gap">Seconds between emails (minimum 30)</label>
+                  <input id="s-gap" name="sendGapSeconds" type="number" min="30" max="3600" required />
+                </div>
+                <div class="field">
+                  <label for="s-jitter">Extra random wait, up to (seconds)</label>
+                  <input id="s-jitter" name="sendJitterSeconds" type="number" min="0" max="600" required />
+                </div>
+                <div class="field">
+                  <label for="s-cap">Daily limit per Gmail account</label>
+                  <input id="s-cap" name="dailySendCap" type="number" min="1" max="2000" required />
+                  <p class="muted">The day resets at midnight Nairobi time. Emails over the limit stay queued and go out the next day.</p>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Save sending settings</button>
+                </div>
+              </form>
             </article>
             <article class="card settings-card" style="margin-bottom: 16px">
               <div class="card-head"><h2>Password</h2></div>
@@ -496,7 +531,7 @@
         </div>
         <form class="form-grid" id="followup-form">
           <input type="hidden" name="campaignId" id="followup-campaign-id" />
-          <p class="muted" id="followup-help">This stays on the same campaign. You do not pick people again — the list stays as-is, bounced contacts are skipped, and you only choose the next template.</p>
+          <p class="muted" id="followup-help">This stays on the same campaign. You do not pick people again. The list stays as-is, bounced contacts are skipped, and you only choose the next template.</p>
           <div class="field full">
             <label for="followup-subject">Subject</label>
             <input id="followup-subject" name="subject" required placeholder="Quick follow-up" />

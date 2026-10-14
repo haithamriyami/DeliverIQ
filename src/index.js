@@ -2,7 +2,7 @@ import { execSync } from 'node:child_process';
 import { env } from './config/env.js';
 import { prisma } from './lib/prisma.js';
 import { campaignQueue } from './queues/campaignQueue.js';
-import { createCampaignWorker } from './queues/workers/campaignWorker.js';
+import { createCampaignWorker, startSendLoop } from './queues/workers/campaignWorker.js';
 import app from './app.js';
 
 const isVercel = Boolean(process.env.VERCEL);
@@ -17,6 +17,8 @@ if (env.nodeEnv === 'production' && !isVercel) {
 
 if (!isVercel && (process.env.REDIS_URL || env.nodeEnv !== 'production')) {
   createCampaignWorker();
+} else if (!isVercel) {
+  startSendLoop();
 }
 
 if (!isVercel) {

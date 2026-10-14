@@ -71,6 +71,9 @@ export const send = [
       enqueued: result.enqueued,
       failed: result.failed,
       remaining: result.remaining,
+      queued: result.queued,
+      paused: Boolean(result.campaign.pausedAt),
+      pausedReason: result.campaign.pausedReason || '',
       skipped: result.skipped,
       errors: result.errors,
     });
