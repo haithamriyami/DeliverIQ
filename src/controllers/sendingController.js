@@ -95,6 +95,14 @@ export const resumeCampaign = [
   }),
 ];
 
+export const pauseCampaign = [
+  validate(campaignIdSchema),
+  asyncHandler(async (req, res) => {
+    await scheduler.pauseCampaign(req.validated.params.id, `Stopped by ${req.user.name}. Press Resume to continue.`);
+    res.json({ ok: true });
+  }),
+];
+
 export const getSettings = asyncHandler(async (req, res) => {
   const ws = await prisma.workspace.findUnique({ where: { id: req.user.workspaceId } });
   res.json({

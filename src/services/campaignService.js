@@ -388,6 +388,11 @@ export async function createFollowUp({ campaignId, subject, templateId, audience
   }
 
   const stepNumber = last.stepNumber + 1;
+  // A new follow-up supersedes earlier steps; nobody still waiting gets the older email later.
+  await prisma.campaignStep.updateMany({
+    where: { campaignId: campaign.id, status: 'sending' },
+    data: { status: 'completed' },
+  });
   const step = await prisma.campaignStep.create({
     data: {
       campaignId: campaign.id,
@@ -799,7 +804,35 @@ function funnelFromCounts(counts, { audienceSize = 0, pending = 0 } = {}) {
   };
 }
 
+/**
+ * Idempotent repair of step and campaign status. Counts are always computed live from
+ * campaign_recipients, so only statuses can drift:
+ * - an older step still in "sending" after a newer step exists is superseded: mark it completed
+ *   (the scheduler never sends it, see queuedSteps)
+ * Returns the step ids it changed. With apply=false it only reports.
+ */
+export async function reconcileCampaignSteps({ apply = true } = {}) {
+  const stale = await prisma.campaignStep.findMany({
+    where: { status: 'sending' },
+    select: {
+      id: true,
+      stepNumber: true,
+      campaignId: true,
+      campaign: { select: { name: true, steps: { select: { stepNumber: true }, orderBy: { stepNumber: 'desc' }, take: 1 } } },
+    },
+  });
+  const superseded = stale.filter((step) => step.stepNumber < (step.campaign.steps[0]?.stepNumber ?? step.stepNumber));
+  if (apply && superseded.length) {
+    await prisma.campaignStep.updateMany({
+      where: { id: { in: superseded.map((step) => step.id) }, status: 'sending' },
+      data: { status: 'completed' },
+    });
+  }
+  return superseded.map((step) => ({ stepId: step.id, campaignId: step.campaignId, campaign: step.campaign.name, stepNumber: step.stepNumber }));
+}
+
 export async function listCampaignsWithStats() {
+  await reconcileCampaignSteps();
   const campaigns = await listCampaigns();
   if (campaigns.length === 0) {
     return [];
@@ -916,6 +949,15 @@ export async function listCampaignsWithStats() {
       }
 
       const currentStep = stepSummaries[stepSummaries.length - 1];
+      const allSteps = stepSummaries.reduce(
+        (sum, step) => ({
+          sent: sum.sent + step.totals.sent,
+          bounced: sum.bounced + step.totals.bounced,
+          opened: sum.opened + step.totals.opened,
+          clicked: sum.clicked + step.totals.clicked,
+        }),
+        { sent: 0, bounced: 0, opened: 0, clicked: 0 }
+      );
       if (currentStep && campaign.status !== currentStep.status) {
         await prisma.campaign.update({
           where: { id: campaign.id },
@@ -927,6 +969,7 @@ export async function listCampaignsWithStats() {
       return {
         ...campaign,
         paused: Boolean(campaign.pausedAt),
+        allSteps,
         replyStats: repliesByCampaign.get(campaign.id) || { replies: 0, autoReplies: 0, optOuts: 0 },
         currentStep,
         steps: stepSummaries,

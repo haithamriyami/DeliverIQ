@@ -10,6 +10,7 @@ router.post('/sync-bounces', campaignsController.syncBounces);
 router.delete('/:id', ...campaignsController.remove);
 router.post('/:id/send', ...campaignsController.send);
 router.post('/:id/resume', ...sendingController.resumeCampaign);
+router.post('/:id/pause', ...sendingController.pauseCampaign);
 router.post('/:id/follow-up', ...campaignsController.followUp);
 router.post('/:id/test', ...campaignsController.testSend);
 router.get('/:id/report', ...campaignsController.report);

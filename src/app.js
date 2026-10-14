@@ -44,6 +44,12 @@ export function createApp() {
     res.sendFile(path.join(publicDir, 'terms.html'));
   });
 
+  // API JSON must never be served from a browser or service worker cache.
+  app.use(['/campaigns', '/sending', '/dashboard', '/recipients', '/templates', '/auth/me'], (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
+
   app.use(routes);
   app.use(notFoundHandler);
   app.use(errorHandler);

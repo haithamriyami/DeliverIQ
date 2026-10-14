@@ -130,10 +130,12 @@ export async function checkCampaignBounceRate(campaignId) {
 }
 
 /**
- * Find the next recipient to send for this sender, across all queued campaigns and follow-ups.
- * Oldest campaign first, Email 1 before follow-ups.
+ * Steps the scheduler may send. Only the latest step of each campaign counts: an older
+ * step left in "sending" (for example Email 1 abandoned before a follow-up was added, from
+ * the old batch sender) must never be picked up silently, because the campaign table only
+ * shows the latest step and those sends were invisible.
  */
-export async function nextPendingForSender(sender) {
+export async function queuedSteps() {
   const steps = await prisma.campaignStep.findMany({
     where: {
       status: 'sending',
@@ -141,10 +143,24 @@ export async function nextPendingForSender(sender) {
     },
     include: {
       template: true,
-      campaign: { include: { template: true } },
+      campaign: {
+        include: {
+          template: true,
+          steps: { select: { stepNumber: true }, orderBy: { stepNumber: 'desc' }, take: 1 },
+        },
+      },
     },
     orderBy: [{ createdAt: 'asc' }, { stepNumber: 'asc' }],
   });
+  return steps.filter((step) => step.stepNumber === (step.campaign.steps[0]?.stepNumber ?? step.stepNumber));
+}
+
+/**
+ * Find the next recipient to send for this sender, across all queued campaigns and follow-ups.
+ * Oldest campaign first, Email 1 before follow-ups.
+ */
+export async function nextPendingForSender(sender) {
+  const steps = await queuedSteps();
 
   for (const step of steps) {
     const owner = await resolveSenderUser(step.campaign.createdById);
@@ -176,10 +192,7 @@ export async function nextPendingForSender(sender) {
 }
 
 export async function queuedCountForSender(sender) {
-  const steps = await prisma.campaignStep.findMany({
-    where: { status: 'sending' },
-    include: { campaign: true },
-  });
+  const steps = await queuedSteps();
   let total = 0;
   for (const step of steps) {
     const owner = await resolveSenderUser(step.campaign.createdById);
