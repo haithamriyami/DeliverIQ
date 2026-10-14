@@ -1,0 +1,17 @@
+name: send-tick
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call send tick
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          APP_URL: ${{ vars.APP_URL || 'https://deliveriq-eosin.vercel.app' }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "CRON_SECRET not set, skipping"; exit 0; fi
+          curl -fsS --max-time 120 -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/cron/send-tick" | head -c 2000
