@@ -1,4 +1,4 @@
-const CACHE = 'deliveriq-shell-v16';
+const CACHE = 'deliveriq-shell-v18';
 const SHELL = [
   '/',
   '/index.html',
@@ -47,6 +47,8 @@ self.addEventListener('fetch', (event) => {
     url.pathname.startsWith('/recipients') ||
     url.pathname.startsWith('/templates') ||
     url.pathname.startsWith('/dashboard') ||
+    url.pathname.startsWith('/sending') ||
+    url.pathname.startsWith('/cron') ||
     url.pathname.startsWith('/webhooks') ||
     url.pathname.startsWith('/unsubscribe') ||
     url.pathname.startsWith('/t/') ||
@@ -58,7 +60,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (isApi) {
-    event.respondWith(fetch(req).catch(() => caches.match(req)));
+    // Live data only. Never answer API calls from the cache.
     return;
   }
 

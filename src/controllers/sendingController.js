@@ -95,6 +95,33 @@ export const resumeCampaign = [
   }),
 ];
 
+export const pauseCampaign = [
+  validate(campaignIdSchema),
+  asyncHandler(async (req, res) => {
+    await scheduler.pauseCampaign(req.validated.params.id, `Stopped by ${req.user.name}. Press Resume to continue.`);
+    res.json({ ok: true });
+  }),
+];
+
+const globalPauseSchema = z.object({
+  body: z.object({ paused: z.boolean() }),
+  params: z.any().optional(),
+  query: z.any().optional(),
+});
+
+/** Kill switch: pause or resume all sending for the workspace. */
+export const globalPause = [
+  validate(globalPauseSchema),
+  asyncHandler(async (req, res) => {
+    const { paused } = req.validated.body;
+    if (!paused && req.user.role !== 'owner') {
+      throw new HttpError(403, 'Only the workspace owner can turn sending back on');
+    }
+    await scheduler.setGlobalPause(req.user.workspaceId, paused, paused ? `All sending paused by ${req.user.name}` : '');
+    res.json({ ok: true, paused });
+  }),
+];
+
 export const getSettings = asyncHandler(async (req, res) => {
   const ws = await prisma.workspace.findUnique({ where: { id: req.user.workspaceId } });
   res.json({
@@ -102,6 +129,7 @@ export const getSettings = asyncHandler(async (req, res) => {
     fromDisplayName: ws?.fromDisplayName || '',
     replyToEmail: ws?.replyToEmail || '',
     defaultDisplayName: req.user.name,
+    sendingPausedAt: ws?.sendingPausedAt || null,
     limits: SETTINGS_LIMITS,
   });
 });

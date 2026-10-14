@@ -211,11 +211,15 @@ function campaignRow(campaign, { actions = false } = {}) {
   const stepId = current.id || '';
   const stepLabel = current.name || 'Email 1';
   const stepLine = (campaign.steps || [])
-    .map((step) => escapeHtml(step.name))
+    .map((step) => `${escapeHtml(step.name)}: ${fmtNum(step.totals?.sent)} sent`)
     .join(' · ');
+  const all = campaign.allSteps || totals;
+  const multi = (campaign.steps || []).length > 1;
+  const withAll = (n, key) => (multi && all[key] !== n ? `${fmtNum(n)}<span class="muted step-line">${fmtNum(all[key])} all emails</span>` : fmtNum(n));
   const actionHtml = actions
     ? `<td class="row-actions">
         ${paused ? `<button class="btn btn-primary btn-small" data-resume-campaign="${campaign.id}">Resume</button>` : ''}
+        ${queued && !paused ? `<button class="btn btn-ghost btn-small" data-pause-campaign="${campaign.id}">Stop sending</button>` : ''}
         ${showSend ? `<button class="btn btn-primary btn-small" data-send="${campaign.id}" data-step="${stepId}">${sendLabel}</button>` : ''}
         <button class="btn btn-ghost btn-small" data-followup="${campaign.id}" data-followup-name="${escapeHtml(campaign.name)}" data-followup-step="${escapeHtml(stepLabel)}">Follow-up</button>
         ${(totals.sent || 0) > 0 ? `<button class="btn btn-ghost btn-small" data-view-audience="${campaign.id}" data-audience-kind="sent" data-audience-step="${stepId}" data-audience-name="${escapeHtml(campaign.name)}">Sent (${fmtNum(totals.sent)})</button>` : ''}
@@ -229,10 +233,10 @@ function campaignRow(campaign, { actions = false } = {}) {
   return `<tr>
     <td>${escapeHtml(campaign.name)}${listName}${stepLine ? `<span class="muted step-line">${stepLine}</span>` : ''}</td>
     <td>${statusBadge(status, totals.pending || 0, paused)}${paused ? ` <span class="muted step-line">${escapeHtml(campaign.pausedReason || '')}</span>` : ''}${(totals.pending || 0) > 0 ? ` <span class="muted">${fmtNum(totals.pending)} not sent · ${escapeHtml(stepLabel)}</span>` : ` <span class="muted">${escapeHtml(stepLabel)}</span>`}</td>
-    <td>${empty ? '-' : fmtNum(totals.sent)}</td>
-    <td>${empty ? '-' : fmtNum(totals.bounced)}</td>
-    <td>${empty ? '-' : fmtNum(totals.opened)}</td>
-    <td>${empty ? '-' : fmtNum(totals.clicked)}</td>
+    <td>${empty ? '-' : withAll(totals.sent, 'sent')}</td>
+    <td>${empty ? '-' : withAll(totals.bounced, 'bounced')}</td>
+    <td>${empty ? '-' : withAll(totals.opened, 'opened')}</td>
+    <td>${empty ? '-' : withAll(totals.clicked, 'clicked')}</td>
     <td title="Replies / auto replies / opt outs">${fmtNum(rs.replies)} replies<span class="muted step-line">${fmtNum(rs.autoReplies)} auto · ${fmtNum(rs.optOuts)} opt outs</span></td>
     <td>${fmtDate(campaign.scheduledAt)}</td>
     ${actionHtml}
@@ -682,6 +686,18 @@ async function loadSendingStatus() {
         <button class="btn btn-primary btn-small" data-resume-sender="${sender.userId}">Resume</button></div>`);
     }
   }
+  if (status.globalPause) {
+    rows.unshift(`<div class="banner-row"><div><strong>All sending is paused</strong>${escapeHtml(status.globalPause.reason || '')}. Nothing is sent from any Gmail account until you resume.</div>
+      <button class="btn btn-primary btn-small" data-global-resume>Resume all sending</button></div>`);
+  }
+  const gpBtn = document.getElementById('global-pause-btn');
+  const gpLabel = document.getElementById('global-pause-label');
+  if (gpBtn && gpLabel) {
+    gpBtn.textContent = status.globalPause ? 'Resume all sending' : 'Pause all sending';
+    gpBtn.className = status.globalPause ? 'btn btn-primary btn-small' : 'btn btn-danger btn-small';
+    gpBtn.dataset.paused = status.globalPause ? '1' : '';
+    gpLabel.textContent = status.globalPause ? 'All sending is paused.' : 'Sending is on. Use this to stop every email right away.';
+  }
   for (const campaign of status.pausedCampaigns || []) {
     rows.push(`<div class="banner-row"><div><strong>Campaign paused: ${escapeHtml(campaign.name)}</strong>${escapeHtml(campaign.pausedReason || '')}</div>
       <button class="btn btn-primary btn-small" data-resume-campaign="${campaign.id}">Resume</button></div>`);
@@ -717,7 +733,7 @@ async function loadSendingStatus() {
  * When the app is closed, the cron tick keeps sending.
  */
 function scheduleTicks(status) {
-  const busy = (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
+  const busy = !status?.globalPause && (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
   if (busy && !tickTimer) {
     tickTimer = setInterval(async () => {
       if (tickBusy || document.hidden) return;
@@ -725,7 +741,11 @@ function scheduleTicks(status) {
       try {
         const result = await api('/sending/tick', { method: 'POST' });
         const fresh = await loadSendingStatus();
-        if (result.sent && currentPage() === 'campaigns') await loadCampaigns();
+        if (result.sent) {
+          const page = currentPage();
+          if (page === 'campaigns' || page === 'reports') await loadCampaigns();
+          if (page === 'dashboard' || page === 'analytics') await loadDashboard();
+        }
         if (!fresh) clearTickTimer();
       } catch {
         // Try again next interval.
@@ -802,7 +822,23 @@ document.getElementById('sending-settings-form')?.addEventListener('submit', asy
 document.addEventListener('click', async (event) => {
   const resumeSender = event.target.closest('[data-resume-sender]');
   const resumeCampaign = event.target.closest('[data-resume-campaign]');
+  const pauseCampaign = event.target.closest('[data-pause-campaign]');
   try {
+    const gp = event.target.closest('#global-pause-btn, [data-global-resume]');
+    if (gp) {
+      const pausing = gp.id === 'global-pause-btn' && !gp.dataset.paused;
+      if (!confirm(pausing ? 'Pause ALL sending from every Gmail account now?' : 'Turn sending back on for all accounts?')) return;
+      await api('/sending/global-pause', { method: 'POST', body: JSON.stringify({ paused: pausing }) });
+      showToast(pausing ? 'All sending paused' : 'Sending resumed');
+      await loadSendingStatus();
+    }
+    if (pauseCampaign) {
+      if (!confirm('Stop sending this campaign? Nothing more goes out until you press Resume.')) return;
+      await api(`/campaigns/${pauseCampaign.dataset.pauseCampaign}/pause`, { method: 'POST' });
+      showToast('Campaign stopped');
+      await loadSendingStatus();
+      if (currentPage() === 'campaigns') await loadCampaigns();
+    }
     if (resumeSender) {
       if (!confirm('Resume sending from this Gmail account? Only do this after checking the account is in good standing.')) return;
       await api('/sending/resume', { method: 'POST', body: JSON.stringify({ userId: resumeSender.dataset.resumeSender }) });
@@ -942,9 +978,10 @@ document.addEventListener('click', async (event) => {
     const editTemplate = event.target.closest('[data-edit-template]');
     const previewTemplate = event.target.closest('[data-preview-template]');
     if (delCampaign) {
-      if (!confirm('Delete this campaign? This cannot be undone.')) return;
+      if (!confirm('Delete this campaign? Its queued emails are cancelled right away. This cannot be undone.')) return;
       await api(`/campaigns/${delCampaign.dataset.deleteCampaign}`, { method: 'DELETE' });
-      showToast('Campaign deleted');
+      showToast('Campaign deleted. Its queued emails are cancelled.');
+      await loadSendingStatus();
       await loadCampaigns();
       await loadDashboard();
     }
