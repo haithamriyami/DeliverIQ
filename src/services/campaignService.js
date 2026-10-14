@@ -220,8 +220,25 @@ export async function getCampaignById(id) {
   });
 }
 
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((resolve) => setTimeout(resolve, ms))]);
+}
+
+/**
+ * Delete a campaign. First stop it in the database (paused + every step closed) so any
+ * sender tick that already picked one of its emails is refused by the final check right
+ * before Gmail is called, then remove legacy queue jobs, then delete the rows.
+ */
 export async function deleteCampaign(id) {
   await getCampaignById(id);
+
+  await prisma.$transaction([
+    prisma.campaign.update({
+      where: { id },
+      data: { pausedAt: new Date(), pausedReason: 'Deleted', status: 'completed' },
+    }),
+    prisma.campaignStep.updateMany({ where: { campaignId: id }, data: { status: 'completed' } }),
+  ]);
 
   const rows = await prisma.campaignRecipient.findMany({
     where: { campaignId: id },
@@ -229,18 +246,27 @@ export async function deleteCampaign(id) {
   });
   const campaign = await prisma.campaign.findUnique({
     where: { id },
-    select: { recipientIds: true },
+    select: { recipientIds: true, steps: { select: { id: true } } },
   });
   const recipientIds = new Set([...(campaign?.recipientIds || []), ...rows.map((row) => row.recipientId)]);
+  const stepIds = (campaign?.steps || []).map((step) => step.id);
 
-  for (const recipientId of recipientIds) {
-    try {
-      const job = await campaignQueue.getJob(sendJobId(id, recipientId));
-      await job?.remove();
-    } catch {
-      // Job may already be gone.
-    }
-  }
+  // Legacy BullMQ jobs (only when Redis is configured). Never let Redis block the delete.
+  await withTimeout(
+    (async () => {
+      for (const recipientId of recipientIds) {
+        for (const jobId of [sendJobId(id, recipientId), ...stepIds.map((stepId) => sendJobId(id, recipientId, stepId))]) {
+          try {
+            const job = await campaignQueue.getJob(jobId);
+            await job?.remove();
+          } catch {
+            // Job may already be gone.
+          }
+        }
+      }
+    })(),
+    3000
+  );
 
   await prisma.campaign.delete({ where: { id } });
   return { ok: true };
@@ -811,7 +837,22 @@ function funnelFromCounts(counts, { audienceSize = 0, pending = 0 } = {}) {
  *   (the scheduler never sends it, see queuedSteps)
  * Returns the step ids it changed. With apply=false it only reports.
  */
+export const FALSE_BOUNCE_ERRORS = ['Follow-up not found', 'Campaign not found'];
+
 export async function reconcileCampaignSteps({ apply = true } = {}) {
+  // Contacts wrongly marked bounced when a send succeeded but its campaign had just been
+  // deleted (the old code treated the "not found" while recording as a bounce).
+  const falseBounces = await prisma.recipient.findMany({
+    where: { status: 'bounced', lastError: { in: FALSE_BOUNCE_ERRORS } },
+    select: { id: true },
+  });
+  if (apply && falseBounces.length) {
+    await prisma.recipient.updateMany({
+      where: { id: { in: falseBounces.map((row) => row.id) }, status: 'bounced', lastError: { in: FALSE_BOUNCE_ERRORS } },
+      data: { status: 'active', lastError: '' },
+    });
+  }
+
   const stale = await prisma.campaignStep.findMany({
     where: { status: 'sending' },
     select: {

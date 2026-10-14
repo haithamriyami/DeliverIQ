@@ -686,6 +686,18 @@ async function loadSendingStatus() {
         <button class="btn btn-primary btn-small" data-resume-sender="${sender.userId}">Resume</button></div>`);
     }
   }
+  if (status.globalPause) {
+    rows.unshift(`<div class="banner-row"><div><strong>All sending is paused</strong>${escapeHtml(status.globalPause.reason || '')}. Nothing is sent from any Gmail account until you resume.</div>
+      <button class="btn btn-primary btn-small" data-global-resume>Resume all sending</button></div>`);
+  }
+  const gpBtn = document.getElementById('global-pause-btn');
+  const gpLabel = document.getElementById('global-pause-label');
+  if (gpBtn && gpLabel) {
+    gpBtn.textContent = status.globalPause ? 'Resume all sending' : 'Pause all sending';
+    gpBtn.className = status.globalPause ? 'btn btn-primary btn-small' : 'btn btn-danger btn-small';
+    gpBtn.dataset.paused = status.globalPause ? '1' : '';
+    gpLabel.textContent = status.globalPause ? 'All sending is paused.' : 'Sending is on. Use this to stop every email right away.';
+  }
   for (const campaign of status.pausedCampaigns || []) {
     rows.push(`<div class="banner-row"><div><strong>Campaign paused: ${escapeHtml(campaign.name)}</strong>${escapeHtml(campaign.pausedReason || '')}</div>
       <button class="btn btn-primary btn-small" data-resume-campaign="${campaign.id}">Resume</button></div>`);
@@ -721,7 +733,7 @@ async function loadSendingStatus() {
  * When the app is closed, the cron tick keeps sending.
  */
 function scheduleTicks(status) {
-  const busy = (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
+  const busy = !status?.globalPause && (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
   if (busy && !tickTimer) {
     tickTimer = setInterval(async () => {
       if (tickBusy || document.hidden) return;
@@ -812,6 +824,14 @@ document.addEventListener('click', async (event) => {
   const resumeCampaign = event.target.closest('[data-resume-campaign]');
   const pauseCampaign = event.target.closest('[data-pause-campaign]');
   try {
+    const gp = event.target.closest('#global-pause-btn, [data-global-resume]');
+    if (gp) {
+      const pausing = gp.id === 'global-pause-btn' && !gp.dataset.paused;
+      if (!confirm(pausing ? 'Pause ALL sending from every Gmail account now?' : 'Turn sending back on for all accounts?')) return;
+      await api('/sending/global-pause', { method: 'POST', body: JSON.stringify({ paused: pausing }) });
+      showToast(pausing ? 'All sending paused' : 'Sending resumed');
+      await loadSendingStatus();
+    }
     if (pauseCampaign) {
       if (!confirm('Stop sending this campaign? Nothing more goes out until you press Resume.')) return;
       await api(`/campaigns/${pauseCampaign.dataset.pauseCampaign}/pause`, { method: 'POST' });
@@ -958,9 +978,10 @@ document.addEventListener('click', async (event) => {
     const editTemplate = event.target.closest('[data-edit-template]');
     const previewTemplate = event.target.closest('[data-preview-template]');
     if (delCampaign) {
-      if (!confirm('Delete this campaign? This cannot be undone.')) return;
+      if (!confirm('Delete this campaign? Its queued emails are cancelled right away. This cannot be undone.')) return;
       await api(`/campaigns/${delCampaign.dataset.deleteCampaign}`, { method: 'DELETE' });
-      showToast('Campaign deleted');
+      showToast('Campaign deleted. Its queued emails are cancelled.');
+      await loadSendingStatus();
       await loadCampaigns();
       await loadDashboard();
     }

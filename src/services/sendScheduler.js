@@ -38,6 +38,69 @@ export async function workspaceSendSettings(workspaceId) {
   return normalizeSendSettings(ws || {});
 }
 
+/** Global kill switch for the sender's workspace. Read fresh from the database every time. */
+export async function globalPauseFor(workspaceId) {
+  const ws = workspaceId
+    ? await prisma.workspace.findUnique({ where: { id: workspaceId }, select: { sendingPausedAt: true } })
+    : await prisma.workspace.findFirst({ where: { sendingPausedAt: { not: null } }, select: { sendingPausedAt: true } });
+  return ws?.sendingPausedAt || null;
+}
+
+export async function setGlobalPause(workspaceId, paused, reason = '') {
+  return prisma.workspace.update({
+    where: { id: workspaceId },
+    data: paused
+      ? { sendingPausedAt: new Date(), sendingPausedReason: String(reason).slice(0, 500) }
+      : { sendingPausedAt: null, sendingPausedReason: '' },
+  });
+}
+
+/**
+ * Last check right before Gmail is called, after the slot is claimed. Everything is
+ * re-read from the database so a delete, Stop, pause, kill switch, reply, opt out or
+ * unsubscribe that happened a moment ago always wins over work picked earlier in a tick.
+ * Returns null if the send may go ahead, otherwise a reason string.
+ */
+export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, campaignId, recipientId }) {
+  const [sender, globalPaused, step, recipient, already] = await Promise.all([
+    prisma.user.findUnique({ where: { id: senderId }, select: { sendingPausedAt: true, gmailRefreshToken: true } }),
+    globalPauseFor(workspaceId),
+    prisma.campaignStep.findUnique({
+      where: { id: stepId },
+      select: {
+        status: true,
+        stepNumber: true,
+        campaignId: true,
+        campaign: {
+          select: {
+            id: true,
+            pausedAt: true,
+            steps: { select: { stepNumber: true }, orderBy: { stepNumber: 'desc' }, take: 1 },
+          },
+        },
+      },
+    }),
+    prisma.recipient.findUnique({ where: { id: recipientId } }),
+    prisma.campaignRecipient.findUnique({ where: { stepId_recipientId: { stepId, recipientId } }, select: { id: true } }),
+  ]);
+  if (globalPaused) return 'global_paused';
+  if (!sender?.gmailRefreshToken || sender.sendingPausedAt) return 'sender_paused';
+  if (!step || !step.campaign || step.campaignId !== campaignId) return 'campaign_deleted';
+  if (step.campaign.pausedAt) return 'campaign_paused';
+  if (step.status !== 'sending') return 'step_not_queued';
+  if (step.stepNumber !== (step.campaign.steps[0]?.stepNumber ?? step.stepNumber)) return 'step_superseded';
+  if (!recipient) return 'recipient_deleted';
+  if (recipient.status !== 'active' || recipient.doNotContact) return 'recipient_inactive';
+  if (step.stepNumber > 1 && recipient.repliedAt) return 'recipient_replied';
+  if (already) return 'already_sent';
+  return null;
+}
+
+/** Give a claimed slot back when the final check stops the send, so the sender is not delayed. */
+async function releaseSlot(senderId, previousNextSendAt) {
+  await prisma.user.update({ where: { id: senderId }, data: { nextSendAt: previousNextSendAt || null } });
+}
+
 /** Which connected Gmail user sends for this campaign (mirrors getUserSender fallback). */
 export async function resolveSenderUser(createdById) {
   if (createdById) {
@@ -227,7 +290,7 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
     nextSendAt: sender.nextSendAt,
     sentToday,
     settings,
-    pausedAt: sender.sendingPausedAt,
+    pausedAt: sender.sendingPausedAt || (await globalPauseFor(sender.workspaceId)),
   });
   if (!decision.ok) {
     return { sent: false, reason: decision.reason, retryAt: decision.retryAt };
@@ -244,8 +307,22 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   }
 
   const { step, campaign, recipient } = work;
+  const blocked = await blockReasonAtSendTime({
+    senderId: sender.id,
+    workspaceId: sender.workspaceId,
+    stepId: step.id,
+    campaignId: campaign.id,
+    recipientId: recipient.id,
+  });
+  if (blocked) {
+    await releaseSlot(sender.id, sender.nextSendAt);
+    console.log(`[send] skipped ${recipient.email}: ${blocked}`);
+    return { sent: false, reason: blocked, retryAt: null };
+  }
+
+  let result;
   try {
-    const result = await send({
+    result = await send({
       to: recipient.email,
       name: recipient.name,
       subject: step.subject,
@@ -256,6 +333,13 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
       userId: sender.id,
     });
+  } catch (err) {
+    return handleSendError(err, { sender, campaign, step, recipient, hooks });
+  }
+
+  // The email is out. Recording must never be mistaken for a send failure: if the campaign
+  // was deleted in the moment between the final check and now, just log it.
+  try {
     await hooks.recordSend?.({
       campaignId: campaign.id,
       recipientId: recipient.id,
@@ -265,8 +349,14 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       senderId: sender.id,
     });
     await hooks.maybeCompleteCampaign?.(campaign.id, step.id);
-    return { sent: true, campaignId: campaign.id, stepId: step.id, email: recipient.email };
   } catch (err) {
+    console.error(`[send] sent to ${recipient.email} but could not record it: ${err.message}`);
+  }
+  return { sent: true, campaignId: campaign.id, stepId: step.id, email: recipient.email };
+}
+
+async function handleSendError(err, { sender, campaign, step, recipient, hooks }) {
+  {
     const kind = classifySendError(err);
     console.error(`[send] ${kind} for ${recipient.email}: ${err.message}`);
     if (kind === 'sender_block' || kind === 'auth') {
@@ -296,6 +386,7 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
   const settings = await workspaceSendSettings();
 
   for (;;) {
+    if (await globalPauseFor()) break;
     const senders = await prisma.user.findMany({
       where: { gmailRefreshToken: { not: null }, sendingPausedAt: null },
     });
@@ -304,7 +395,8 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
     for (const sender of senders) {
       const result = await sendOneForSender(sender, settings, { now: new Date(), hooks });
       results.push({ sender: sender.gmailEmail, ...result });
-      if (result.reason === 'idle' || result.reason === 'daily_cap' || result.reason === 'sender_paused' || result.reason === 'paused') {
+      if (result.reason && result.reason !== 'gap' && result.reason !== 'bounced') {
+        // idle, cap, paused, or stopped by the final check: nothing to wait for this tick.
         continue;
       }
       anyWork = true;
@@ -348,9 +440,15 @@ export async function sendingStatus() {
       pausedReason: sender.sendingPausedReason,
     });
   }
+  const ws = await prisma.workspace.findFirst({ orderBy: { createdAt: 'asc' }, select: { sendingPausedAt: true, sendingPausedReason: true } });
   const pausedCampaigns = await prisma.campaign.findMany({
     where: { pausedAt: { not: null } },
     select: { id: true, name: true, pausedAt: true, pausedReason: true },
   });
-  return { settings, senders: rows, pausedCampaigns };
+  return {
+    settings,
+    senders: rows,
+    pausedCampaigns,
+    globalPause: ws?.sendingPausedAt ? { pausedAt: ws.sendingPausedAt, reason: ws.sendingPausedReason } : null,
+  };
 }
