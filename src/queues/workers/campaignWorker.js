@@ -7,7 +7,7 @@ const LOOP_MS = 5000;
 
 /**
  * Long running hosts (local dev, Render) call the same throttled tick on an interval.
- * The per sender slot in Postgres keeps the 30 to 40 second gap and daily cap,
+ * The per sender slot in Postgres keeps the per account gap and daily cap,
  * even if a Vercel cron tick runs at the same time.
  */
 export function startSendLoop() {

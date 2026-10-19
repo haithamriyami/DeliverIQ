@@ -643,7 +643,7 @@ async function sendCampaignBatches(campaignId, stepId) {
     if (result.paused) {
       showToast(result.pausedReason || 'This campaign is paused. Press Resume first.');
     } else if (result.remaining) {
-      showToast(`Queued ${fmtNum(result.remaining)}. DeliverIQ sends one email every 30 to 40 seconds, up to the daily limit.`);
+      showToast(`Sending started. ${fmtNum(result.remaining)} queued${result.estimatedFinish ? `, about done by ${fmtTime(result.estimatedFinish)} Nairobi time` : ''}. You can close the app; sending continues on the server.`);
     } else {
       showToast(`Done: ${fmtNum(result.enqueued)} sent${result.failed ? `, ${fmtNum(result.failed)} bounced` : ''}`);
     }
@@ -709,7 +709,10 @@ async function loadSendingStatus() {
   if (meter) {
     const parts = (status.senders || []).map((sender) => {
       const base = `${escapeHtml(sender.email)}: ${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today, ${fmtNum(sender.queued)} queued`;
-      if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time`;
+      if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time${sender.estimatedFinish ? `, all done about ${fmtTime(sender.estimatedFinish)}` : ''}`;
+      if (sender.queued && sender.estimatedFinish && !sender.paused && !status.globalPause) {
+        return `${base}. About ${fmtNum(sender.emailsPerHour)} per hour, estimated finish ${fmtTime(sender.estimatedFinish)} Nairobi time`;
+      }
       return base;
     });
     meter.innerHTML = parts.join('<br>');
@@ -719,7 +722,7 @@ async function loadSendingStatus() {
   if (accounts) {
     accounts.innerHTML = (status.senders || []).length
       ? status.senders
-          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today · ${fmtNum(sender.queued)} queued${sender.paused ? ' · paused' : ''}</span></div>`)
+          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}</span></div>`)
           .join('')
       : '<p class="muted">No Gmail account connected yet.</p>';
   }
@@ -883,7 +886,7 @@ async function showCampaignAudience(campaignId, name, kind, stepId) {
     ? rows
         .map((row) => {
           const status = row.status || (kind === 'bounced' ? 'bounced' : kind === 'pending' ? 'pending' : 'sent');
-          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : kind === 'pending' ? 'Queued. Sends automatically, one email every 30 to 40 seconds' : status;
+          const detail = kind === 'bounced' ? row.error || row.recipient?.lastError || 'Bounced' : kind === 'pending' ? 'Queued. Sends automatically, a few seconds apart' : status;
           return `<tr>
             <td>${escapeHtml(row.recipient?.name || '')}</td>
             <td>${escapeHtml(row.recipient?.email || '')}</td>
@@ -943,7 +946,7 @@ document.addEventListener('click', async (event) => {
         showToast('A send is already running');
         return;
       }
-      if (!confirm('Queue this email for eligible people on this campaign? It goes out one at a time with a 30 to 40 second gap, up to the daily limit. Bounced, replied and opted out contacts are skipped.')) return;
+      if (!confirm('Queue this email for eligible people on this campaign? Sending starts right away, one email at a time with a short gap (default 10 to 15 seconds), up to the daily limit. It keeps going on the server if you close the app. Bounced, replied and opted out contacts are skipped.')) return;
       await sendCampaignBatches(sendBtn.dataset.send, sendBtn.dataset.step);
     }
     const followBtn = event.target.closest('[data-followup]');

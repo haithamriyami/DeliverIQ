@@ -3,13 +3,13 @@ import { DateTime } from 'luxon';
 export const SEND_TIMEZONE = 'Africa/Nairobi';
 
 export const DEFAULT_SEND_SETTINGS = Object.freeze({
-  sendGapSeconds: 30,
-  sendJitterSeconds: 10,
+  sendGapSeconds: 10,
+  sendJitterSeconds: 5,
   dailySendCap: 200,
 });
 
 export const SETTINGS_LIMITS = Object.freeze({
-  sendGapSeconds: { min: 30, max: 3600 },
+  sendGapSeconds: { min: 5, max: 3600 },
   sendJitterSeconds: { min: 0, max: 600 },
   dailySendCap: { min: 1, max: 2000 },
 });
@@ -65,4 +65,44 @@ export function sendDecision({ now = new Date(), nextSendAt = null, sentToday = 
     return { ok: false, reason: 'gap', retryAt: nextSendAt };
   }
   return { ok: true };
+}
+
+/** Typical time Gmail and the database take per email on top of the gap. */
+export const SEND_OVERHEAD_MS = 1500;
+
+/** Average time between two emails from one account with these settings. */
+export function averageSendIntervalMs(settings) {
+  const { sendGapSeconds, sendJitterSeconds } = normalizeSendSettings(settings);
+  return (sendGapSeconds + sendJitterSeconds / 2) * 1000 + SEND_OVERHEAD_MS;
+}
+
+/** Emails per hour one account can send with these settings (ignoring the daily cap). */
+export function emailsPerHour(settings) {
+  return Math.floor(3600000 / averageSendIntervalMs(settings));
+}
+
+/**
+ * Estimated time the last queued email goes out for one account. Respects the
+ * gap, the daily cap and the Africa/Nairobi day boundary. Returns null when nothing is queued.
+ */
+export function estimateFinish({ now = new Date(), queued = 0, sentToday = 0, nextSendAt = null, settings } = {}) {
+  if (!queued || queued <= 0) return null;
+  const { dailySendCap } = normalizeSendSettings(settings);
+  const interval = averageSendIntervalMs(settings);
+  let remaining = queued;
+  let leftToday = Math.max(0, dailySendCap - sentToday);
+  let start = Math.max(now.getTime(), nextSendAt ? new Date(nextSendAt).getTime() : 0);
+  let dayEnd = nextSendDayStart(now).getTime();
+  for (let guard = 0; guard < 3660; guard += 1) {
+    const fitsByTime = Math.max(0, Math.floor((dayEnd - start) / interval) + 1);
+    const batch = Math.min(remaining, leftToday, fitsByTime);
+    if (batch >= remaining) {
+      return new Date(start + (remaining - 1) * interval);
+    }
+    remaining -= batch;
+    start = dayEnd;
+    dayEnd = nextSendDayStart(new Date(dayEnd + 1000)).getTime();
+    leftToday = dailySendCap;
+  }
+  return null;
 }

@@ -5,7 +5,7 @@
  * - Each sender (connected Gmail account) has users.next_send_at in Postgres.
  *   Before every send we claim the slot with one atomic UPDATE
  *   (WHERE next_send_at IS NULL OR next_send_at <= now()), which also moves
- *   next_send_at 30 to 40 seconds forward. Two overlapping ticks (cron + browser)
+ *   next_send_at forward by the gap (default 10 to 15 seconds). Two overlapping ticks (cron + browser)
  *   can never both send for the same account.
  * - runSendTick() sends at most one due email per sender, then, if the next slot
  *   still fits inside the time budget of this invocation, waits for it and repeats.
@@ -21,6 +21,8 @@ import {
   sendDayStart,
   nextSendDayStart,
   sendDecision,
+  estimateFinish,
+  emailsPerHour,
 } from '../utils/throttle.js';
 import { classifySendError, senderPauseMessage } from '../utils/sendErrors.js';
 
@@ -434,6 +436,10 @@ export async function sendingStatus() {
       dailyCap: settings.dailySendCap,
       capReached: sentToday >= settings.dailySendCap,
       resumesAt: sentToday >= settings.dailySendCap ? nextSendDayStart(now) : null,
+      estimatedFinish: sender.sendingPausedAt
+        ? null
+        : estimateFinish({ now, queued, sentToday, nextSendAt: sender.nextSendAt, settings }),
+      emailsPerHour: emailsPerHour(settings),
       nextSendAt: sender.nextSendAt,
       paused: Boolean(sender.sendingPausedAt),
       pausedAt: sender.sendingPausedAt,

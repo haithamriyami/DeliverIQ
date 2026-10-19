@@ -8,9 +8,10 @@ import { prisma } from '../lib/prisma.js';
 import * as campaignService from '../services/campaignService.js';
 import * as scheduler from '../services/sendScheduler.js';
 import { SETTINGS_LIMITS, normalizeSendSettings } from '../utils/throttle.js';
+import { runInBackground, canRunInBackground, sendRunBudgetMs } from '../utils/background.js';
+import { runBackgroundSender } from '../services/backgroundSender.js';
 
 const INBOX_SYNC_EVERY_MS = 10 * 60 * 1000;
-const CRON_BUDGET_MS = 50 * 1000;
 
 function cronAuthorized(req) {
   if (!env.cronSecret) return false;
@@ -21,7 +22,7 @@ function cronAuthorized(req) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function maybeSyncInbox() {
+export async function maybeSyncInbox() {
   const stale = await prisma.user.findFirst({
     where: {
       gmailRefreshToken: { not: null },
@@ -48,13 +49,29 @@ export const cronTick = asyncHandler(async (req, res) => {
   if (!cronAuthorized(req)) {
     throw new HttpError(401, 'Not authorized');
   }
-  const inbox = await maybeSyncInbox();
-  const tick = await campaignService.runSchedulerTick({ budgetMs: CRON_BUDGET_MS });
-  res.json({ ok: true, inbox, ...tick });
+  const run = runBackgroundSender({ budgetMs: () => sendRunBudgetMs(), beforeRun: maybeSyncInbox });
+  if (runInBackground(run)) {
+    // Answer at once; the run keeps going until close to the function deadline.
+    return res.json({ ok: true, started: true });
+  }
+  res.json({ ok: true, ...(await run) });
 });
 
-/** Called by the open app every few seconds. Sends only what is due right now, never waits. */
+/**
+ * Make sure a background run is going. Used by the Send button and the open app.
+ * On Vercel this returns at once and the run continues after the tab closes.
+ * Elsewhere (local, Render) it only sends what is due now; the send loop does the rest.
+ */
+export function kickBackgroundSender() {
+  if (!canRunInBackground()) return false;
+  return runInBackground(runBackgroundSender({ budgetMs: () => sendRunBudgetMs() }));
+}
+
+/** Called by the open app every few seconds. Never waits for the gap itself. */
 export const tick = asyncHandler(async (_req, res) => {
+  if (kickBackgroundSender()) {
+    return res.json({ ok: true, background: true });
+  }
   const result = await campaignService.runSchedulerTick({ budgetMs: 0 });
   res.json({ ok: true, sent: result.results.filter((row) => row.sent).length });
 });

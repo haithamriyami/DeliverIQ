@@ -3,7 +3,7 @@
   "framework": "express",
   "functions": {
     "src/**/*.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
   "crons": [
