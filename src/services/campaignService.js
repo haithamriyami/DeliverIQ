@@ -24,7 +24,7 @@ function isSendable(recipient, step) {
 
 /**
  * Run one throttled scheduler tick. budgetMs is how long this invocation may keep
- * waiting for the next 30 to 40 second slot (0 means send only what is due right now).
+ * waiting for the next send slot (0 means send only what is due right now).
  */
 export async function runSchedulerTick({ budgetMs = 0 } = {}) {
   return runSendTick({
@@ -330,7 +330,7 @@ export async function enqueueCampaign(campaignId, stepId) {
   }
 
   // Queue the step. The throttled scheduler (cron tick, or the open app) sends one
-  // email per Gmail account every 30 to 40 seconds, up to the daily cap.
+  // email per Gmail account at the configured gap (default 10 to 15 seconds), up to the daily cap.
   await prisma.$transaction([
     prisma.campaign.update({
       where: { id: campaignId },
@@ -1132,7 +1132,7 @@ export async function sendTestEmail({ campaignId, to }) {
         ? 'Sending from this Gmail account is paused. Resume it first.'
         : decision.reason === 'daily_cap'
           ? 'The daily limit for this Gmail account is reached. Try again tomorrow.'
-          : 'Gmail needs at least 30 seconds between emails. Try the test again in a moment.';
+          : 'This Gmail account sent an email a few seconds ago. Try the test again in a moment.';
       throw new HttpError(429, why);
     }
   }

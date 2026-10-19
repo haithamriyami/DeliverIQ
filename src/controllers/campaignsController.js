@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
 import * as campaignService from '../services/campaignService.js';
+import { kickBackgroundSender } from './sendingController.js';
+import { sendingStatus } from '../services/sendScheduler.js';
 
 const createCampaignSchema = z.object({
   body: z.object({
@@ -64,7 +66,17 @@ export const send = [
       req.validated.params.id,
       req.validated.body?.stepId
     );
+    // First email already went out inside enqueueCampaign if the slot was free.
+    // Keep sending on the server after this response, even if the tab is closed.
+    const background = result.remaining > 0 ? kickBackgroundSender() : false;
+    let estimatedFinish = null;
+    if (result.remaining > 0) {
+      const status = await sendingStatus().catch(() => null);
+      estimatedFinish = status?.senders?.find((row) => row.queued > 0)?.estimatedFinish || null;
+    }
     res.json({
+      background,
+      estimatedFinish,
       campaignId: result.campaign.id,
       stepId: result.stepId,
       status: result.campaign.status,

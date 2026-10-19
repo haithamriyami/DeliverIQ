@@ -45,10 +45,10 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
   let r = await scheduler.sendOneForSender(await fresh(), settings, { now, send, hooks });
   assert.equal(r.sent, true);
   const after1 = (await fresh()).nextSendAt.getTime() - now.getTime();
-  assert.ok(after1 >= 30000 && after1 <= 40000);
+  assert.ok(after1 >= 10000 && after1 <= 15000);
 
-  // 10 s later: blocked by the gap.
-  r = await scheduler.sendOneForSender(await fresh(), settings, { now: new Date(now.getTime() + 10000), send, hooks });
+  // 5 s later: blocked by the gap.
+  r = await scheduler.sendOneForSender(await fresh(), settings, { now: new Date(now.getTime() + 5000), send, hooks });
   assert.equal(r.reason, 'gap');
 
   // Concurrent claim: only one of two simultaneous ticks may send.

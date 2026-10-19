@@ -45,8 +45,8 @@ model Workspace {
   gmailConnectedAt  DateTime? @map("gmail_connected_at")
   fromDisplayName   String?   @map("from_display_name")
   replyToEmail      String?   @map("reply_to_email")
-  sendGapSeconds    Int       @default(30) @map("send_gap_seconds")
-  sendJitterSeconds Int       @default(10) @map("send_jitter_seconds")
+  sendGapSeconds    Int       @default(10) @map("send_gap_seconds")
+  sendJitterSeconds Int       @default(5) @map("send_jitter_seconds")
   dailySendCap      Int       @default(200) @map("daily_send_cap")
   // Global kill switch: while set, nothing is sent from any account in this workspace.
   sendingPausedAt     DateTime? @map("sending_paused_at")
@@ -240,4 +240,15 @@ model InboundReply {
   @@index([campaignId, type])
   @@index([recipientId])
   @@map("inbound_replies")
+}
+
+/// One long running background sender at a time. Overlap is still safe because every
+/// send claims users.next_send_at atomically; the lease just avoids idle duplicate runs.
+model SchedulerLease {
+  name      String   @id
+  holder    String
+  expiresAt DateTime @map("expires_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("scheduler_leases")
 }
