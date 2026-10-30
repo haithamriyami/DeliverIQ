@@ -147,9 +147,10 @@ export const audience = [
   }),
 ];
 
-export const syncBounces = asyncHandler(async (_req, res) => {
+export const syncBounces = asyncHandler(async (req, res) => {
   try {
-    const result = await campaignService.syncBouncesFromGmail();
+    const force = req.query?.force === '1' || req.body?.force === true;
+    const result = await campaignService.syncBouncesFromGmail({ force });
     res.json(result);
   } catch (err) {
     if (err.status === 403) {

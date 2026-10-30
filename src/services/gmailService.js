@@ -506,3 +506,115 @@ export async function listGmailInboundReplies(userId, { days = 14, max = 100 } =
   }
   return out;
 }
+
+const MESSAGE_FIELDS =
+  'id,threadId,internalDate,snippet,labelIds,payload(mimeType,headers,body/data,parts(mimeType,body/data,parts(mimeType,body/data,parts(mimeType,body/data))))';
+const SKIP_LABELS = new Set(['SENT', 'DRAFT', 'CHAT', 'SPAM', 'TRASH']);
+const BOUNCE_SUBJECT_RE =
+  /delivery status notification|undeliverable|mail delivery (subsystem|failed)|returned to sender|delivery incomplete|message not delivered|address not found|failure notice|delivery has failed/i;
+
+function parseMessage(data, senderEmail) {
+  const headers = data.payload?.headers || [];
+  const fromRaw = headerOf(headers, 'From');
+  const fromEmail = (String(fromRaw).toLowerCase().match(EMAIL_RE) || [])[0] || '';
+  const subject = headerOf(headers, 'Subject');
+  const body = plainTextOf(data.payload);
+  const isBounce =
+    /^(mailer-daemon|postmaster)@/.test(fromEmail) || (BOUNCE_SUBJECT_RE.test(subject) && fromEmail !== senderEmail);
+  return {
+    id: data.id,
+    threadId: data.threadId,
+    fromEmail,
+    subject,
+    body,
+    headers,
+    snippet: data.snippet || '',
+    receivedAt: data.internalDate ? new Date(Number(data.internalDate)) : new Date(),
+    isBounce,
+    fullText: `${headers.map((h) => `${h.name}: ${h.value}`).join('\n')}\n${collectGmailText(data.payload).join('\n')}\n${data.snippet || ''}`,
+  };
+}
+
+/** Addresses a bounce message reports as undeliverable. Delays are ignored. */
+export function bounceNoticesFromMessage(message, senderEmail = '') {
+  if (!message?.isBounce) return [];
+  const { type, reason } = bounceTypeFromText(message.fullText, message.subject);
+  if (type === 'delay') return [];
+  let found = failedEmailsFromText(message.fullText);
+  if (found.length === 0) found = emailsInText(message.fullText);
+  return found.filter((email) => !isNoiseEmail(email, senderEmail)).map((email) => ({ email, reason }));
+}
+
+/** Inbound message that can be a reply to a campaign email. */
+export function isReplyCandidate(message, senderEmail = '') {
+  return Boolean(message) && !message.isBounce && !isNoiseEmail(message.fromEmail, senderEmail);
+}
+
+/**
+ * New inbox messages since the stored Gmail historyId (incremental, cheap).
+ * First sync or an expired historyId falls back to a small recent search.
+ * Fetches at most `max` messages, only the fields we need.
+ * Returns { messages, historyId, truncated }.
+ */
+export async function fetchInboxDelta(userId, { historyId = null, after = null, max = 25 } = {}) {
+  const sender = await getUserSender(userId);
+  if (!sender) return { messages: [], historyId, truncated: false };
+  const client = createOAuthClient();
+  client.setCredentials({ refresh_token: sender.refreshToken });
+  const gmail = google.gmail({ version: 'v1', auth: client });
+  const senderEmail = String(sender.email || '').toLowerCase();
+
+  let ids = [];
+  let nextHistoryId = historyId;
+  let useSearch = !historyId;
+  if (historyId) {
+    try {
+      let pageToken;
+      do {
+        const res = await gmail.users.history.list({
+          userId: 'me',
+          startHistoryId: historyId,
+          historyTypes: ['messageAdded'],
+          maxResults: 100,
+          pageToken,
+          fields: 'history(messagesAdded(message(id,labelIds))),historyId,nextPageToken',
+        });
+        for (const h of res.data.history || []) {
+          for (const added of h.messagesAdded || []) {
+            const labels = added.message?.labelIds || [];
+            if (labels.some((label) => SKIP_LABELS.has(label))) continue;
+            ids.push(added.message.id);
+          }
+        }
+        nextHistoryId = res.data.historyId || nextHistoryId;
+        pageToken = res.data.nextPageToken || undefined;
+      } while (pageToken && ids.length < max * 4);
+    } catch (err) {
+      const status = Number(err?.code || err?.response?.status || 0);
+      if (status !== 404) throw err;
+      useSearch = true; // historyId too old: start over from a small search
+    }
+  }
+  if (useSearch) {
+    const profile = await gmail.users.getProfile({ userId: 'me', fields: 'historyId' });
+    nextHistoryId = profile.data.historyId || nextHistoryId;
+    const since = after ? `after:${Math.floor(new Date(after).getTime() / 1000)}` : 'newer_than:2d';
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: max,
+      q: `${since} -from:me -in:sent -in:chats`,
+      fields: 'messages(id)',
+    });
+    ids = (list.data.messages || []).map((m) => m.id);
+  }
+
+  ids = [...new Set(ids)];
+  const truncated = ids.length > max;
+  const messages = [];
+  for (const id of ids.slice(0, max)) {
+    const res = await gmail.users.messages.get({ userId: 'me', id, format: 'full', fields: MESSAGE_FIELDS });
+    if ((res.data.labelIds || []).some((label) => SKIP_LABELS.has(label))) continue;
+    messages.push(parseMessage(res.data, senderEmail));
+  }
+  return { messages, historyId: nextHistoryId ? String(nextHistoryId) : null, truncated, senderEmail };
+}

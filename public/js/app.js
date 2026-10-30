@@ -713,7 +713,7 @@ async function loadSendingStatus() {
       if (sender.queued && sender.estimatedFinish && !sender.paused && !status.globalPause) {
         return `${base}. About ${fmtNum(sender.emailsPerHour)} per hour, estimated finish ${fmtTime(sender.estimatedFinish)} Nairobi time`;
       }
-      return base;
+      return sender.inboxNotice ? `${base}<br><span class="muted">${escapeHtml(sender.inboxNotice)}</span>` : base;
     });
     meter.innerHTML = parts.join('<br>');
     meter.hidden = parts.length === 0;
@@ -901,9 +901,13 @@ async function showCampaignAudience(campaignId, name, kind, stepId) {
 
 async function syncGmailBounces({ quiet = false } = {}) {
   try {
-    const result = await api('/campaigns/sync-bounces', { method: 'POST' });
+    const result = await api('/campaigns/sync-bounces', { method: 'POST', body: JSON.stringify({ force: !quiet }) });
     if (!quiet) {
-      if (result.marked) {
+      if (result.notice) {
+        showToast(result.notice);
+      } else if (result.skipped) {
+        showToast('The inbox was checked a moment ago. Bounces and replies are checked automatically every few minutes.');
+      } else if (result.marked) {
         showToast(
           `Marked ${result.marked} bounced address${result.marked === 1 ? '' : 'es'} from Gmail${
             result.scanned > result.marked ? ` (${result.scanned} notices scanned)` : ''

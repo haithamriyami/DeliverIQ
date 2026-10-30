@@ -10,8 +10,8 @@ import * as scheduler from '../services/sendScheduler.js';
 import { SETTINGS_LIMITS, normalizeSendSettings } from '../utils/throttle.js';
 import { runInBackground, canRunInBackground, sendRunBudgetMs } from '../utils/background.js';
 import { runBackgroundSender } from '../services/backgroundSender.js';
+import { syncAllInboxes } from '../services/inboxSync.js';
 
-const INBOX_SYNC_EVERY_MS = 10 * 60 * 1000;
 
 function cronAuthorized(req) {
   if (!env.cronSecret) return false;
@@ -22,26 +22,13 @@ function cronAuthorized(req) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/** Inbox sync for background runs. Throttled per account inside syncAllInboxes. */
 export async function maybeSyncInbox() {
-  const stale = await prisma.user.findFirst({
-    where: {
-      gmailRefreshToken: { not: null },
-      OR: [{ lastInboxSyncAt: null }, { lastInboxSyncAt: { lt: new Date(Date.now() - INBOX_SYNC_EVERY_MS) } }],
-    },
-  });
-  if (!stale) return null;
-  const out = {};
   try {
-    out.replies = await campaignService.syncRepliesFromGmail();
+    return await syncAllInboxes();
   } catch (err) {
-    out.repliesError = err.message;
+    return { error: err.message };
   }
-  try {
-    out.bounces = await campaignService.syncBouncesFromGmail();
-  } catch (err) {
-    out.bouncesError = err.message;
-  }
-  return out;
 }
 
 /** Called by Vercel Cron (or any scheduler) with Authorization: Bearer CRON_SECRET. */
@@ -189,5 +176,5 @@ export const updateSettings = [
 ];
 
 export const syncReplies = asyncHandler(async (_req, res) => {
-  res.json(await campaignService.syncRepliesFromGmail());
+  res.json(await campaignService.syncRepliesFromGmail({ force: false }));
 });
