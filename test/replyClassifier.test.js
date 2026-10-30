@@ -49,8 +49,8 @@ test('quoted original email with our unsubscribe footer does not count as an opt
 });
 
 test('send error classification', () => {
-  assert.equal(classifySendError({ code: 429, message: 'Too many requests' }), 'sender_block');
-  assert.equal(classifySendError({ message: 'User-rate limit exceeded' }), 'sender_block');
+  assert.equal(classifySendError({ code: 429, message: 'Too many requests' }), 'transient');
+  assert.equal(classifySendError({ message: 'User-rate limit exceeded' }), 'transient');
   assert.equal(classifySendError({ code: 400, message: 'Mail service not enabled: account suspended' }), 'sender_block');
   assert.equal(classifySendError({ code: 403, message: 'Message rejected for policy reasons' }), 'sender_block');
   assert.equal(classifySendError({ message: 'invalid_grant' }), 'auth');

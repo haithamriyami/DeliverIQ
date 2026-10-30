@@ -24,7 +24,7 @@ import {
   estimateFinish,
   emailsPerHour,
 } from '../utils/throttle.js';
-import { classifySendError, senderPauseMessage } from '../utils/sendErrors.js';
+import { classifySendError, senderPauseMessage, isQuotaOnlyPauseReason, retryAfterMs, backoffMs, QUOTA_PAUSE_MARKERS } from '../utils/sendErrors.js';
 
 export const BOUNCE_PAUSE_MIN_SENDS = 20;
 export const BOUNCE_PAUSE_RATE = 0.05;
@@ -142,6 +142,38 @@ export async function pauseSender(senderId, reason) {
     where: { id: senderId },
     data: { sendingPausedAt: new Date(), sendingPausedReason: String(reason).slice(0, 1000) },
   });
+}
+
+/**
+ * Senders the old code paused only because of Gmail's per minute API quota (a read quota
+ * hit by inbox scanning, shared with sending). That is not an account problem, so resume
+ * them. Real pauses (policy, suspension, daily sending limit, reconnect) are kept.
+ * Idempotent; runs on every scheduler tick and status read.
+ */
+export async function resumeQuotaPausedSenders() {
+  const paused = await prisma.user.findMany({
+    where: {
+      sendingPausedAt: { not: null },
+      OR: QUOTA_PAUSE_MARKERS.map((marker) => ({ sendingPausedReason: { contains: marker } })),
+    },
+    select: { id: true, sendingPausedReason: true },
+  });
+  const ids = paused.filter((u) => isQuotaOnlyPauseReason(u.sendingPausedReason)).map((u) => u.id);
+  if (!ids.length) return 0;
+  const result = await prisma.user.updateMany({
+    where: { id: { in: ids }, sendingPausedAt: { not: null } },
+    data: { sendingPausedAt: null, sendingPausedReason: '' },
+  });
+  return result.count;
+}
+
+/** Per minute quota on send: wait a bit (exponential, Retry-After honored), do not pause. */
+export async function backOffSender(sender, err, now = new Date()) {
+  const attempts = (sender.sendBackoffCount || 0) + 1;
+  const wait = backoffMs(attempts, { baseMs: 60000, maxMs: 15 * 60000, retryAfter: retryAfterMs(err, now.getTime()) });
+  const nextSendAt = new Date(now.getTime() + wait);
+  await prisma.user.update({ where: { id: sender.id }, data: { nextSendAt, sendBackoffCount: attempts } });
+  return nextSendAt;
 }
 
 export async function resumeSender(senderId) {
@@ -339,6 +371,10 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
     return handleSendError(err, { sender, campaign, step, recipient, hooks });
   }
 
+  if (sender.sendBackoffCount) {
+    await prisma.user.update({ where: { id: sender.id }, data: { sendBackoffCount: 0 } }).catch(() => {});
+  }
+
   // The email is out. Recording must never be mistaken for a send failure: if the campaign
   // was deleted in the moment between the final check and now, just log it.
   try {
@@ -361,6 +397,10 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks }
   {
     const kind = classifySendError(err);
     console.error(`[send] ${kind} for ${recipient.email}: ${err.message}`);
+    if (kind === 'transient') {
+      const retryAt = await backOffSender(sender, err);
+      return { sent: false, reason: 'backoff', retryAt, error: err.message };
+    }
     if (kind === 'sender_block' || kind === 'auth') {
       await pauseSender(sender.id, senderPauseMessage(kind, err));
       return { sent: false, reason: 'sender_paused', error: err.message };
@@ -387,6 +427,7 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
   const results = [];
   const settings = await workspaceSendSettings();
 
+  await resumeQuotaPausedSenders();
   for (;;) {
     if (await globalPauseFor()) break;
     const senders = await prisma.user.findMany({
@@ -418,6 +459,7 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
 
 /** Per sender status for the UI: sent today, queued, cap, next send, pause banner. */
 export async function sendingStatus() {
+  await resumeQuotaPausedSenders();
   const settings = await workspaceSendSettings();
   const now = new Date();
   const senders = await prisma.user.findMany({
@@ -441,6 +483,8 @@ export async function sendingStatus() {
         : estimateFinish({ now, queued, sentToday, nextSendAt: sender.nextSendAt, settings }),
       emailsPerHour: emailsPerHour(settings),
       nextSendAt: sender.nextSendAt,
+      inboxNotice: sender.inboxSyncNotice || '',
+      inboxLastSyncAt: sender.lastInboxSyncAt,
       paused: Boolean(sender.sendingPausedAt),
       pausedAt: sender.sendingPausedAt,
       pausedReason: sender.sendingPausedReason,

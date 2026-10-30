@@ -74,6 +74,14 @@ model User {
   sendingPausedAt      DateTime? @map("sending_paused_at")
   sendingPausedReason  String    @default("") @map("sending_paused_reason")
   lastInboxSyncAt      DateTime? @map("last_inbox_sync_at")
+  // Inbox sync (bounces + replies): incremental cursor, throttle, lease and quota backoff.
+  gmailHistoryId       String?   @map("gmail_history_id")
+  inboxSyncNotBefore   DateTime? @map("inbox_sync_not_before")
+  inboxSyncLeaseUntil  DateTime? @map("inbox_sync_lease_until")
+  inboxSyncErrors      Int       @default(0) @map("inbox_sync_errors")
+  inboxSyncNotice      String    @default("") @map("inbox_sync_notice")
+  // Short send backoff after a per minute Gmail quota error (never a pause).
+  sendBackoffCount     Int       @default(0) @map("send_backoff_count")
 
   workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaigns Campaign[]

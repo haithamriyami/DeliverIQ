@@ -3,7 +3,6 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { campaignQueue, sendJobId } from '../queues/campaignQueue.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
 import { env } from '../config/env.js';
-import { listGmailBounceAddresses, listGmailInboundReplies } from './gmailService.js';
 import { campaignAssignmentsForRecipients } from './recipientService.js';
 import {
   runSendTick,
@@ -702,8 +701,18 @@ export async function listCampaignBounces(campaignId) {
   return listCampaignAudience(campaignId, 'bounced');
 }
 
-export async function syncBouncesFromGmail() {
-  const notices = await listGmailBounceAddresses();
+/**
+ * Manual or page triggered bounce check. Goes through the throttled, incremental inbox
+ * sync (one sync covers bounces and replies) instead of rescanning Gmail every time.
+ */
+export async function syncBouncesFromGmail({ force = false } = {}) {
+  const { syncAllInboxes } = await import('./inboxSync.js');
+  const result = await syncAllInboxes({ force });
+  return { scanned: result.scanned, marked: result.bouncesMarked, emails: result.bouncedEmails, skipped: result.skipped, notice: result.notice };
+}
+
+/** Mark contacts from Gmail bounce notices as bounced. Idempotent. */
+export async function applyBounceNotices(notices) {
   if (notices.length === 0) {
     return { scanned: 0, marked: 0, emails: [] };
   }
@@ -1156,20 +1165,16 @@ export async function sendTestEmail({ campaignId, to }) {
  * Human replies stop follow-ups; opt outs also mark the contact do not contact;
  * auto replies are only counted.
  */
-export async function syncRepliesFromGmail({ classify = classifyReply } = {}) {
-  const senders = await prisma.user.findMany({ where: { gmailRefreshToken: { not: null } } });
+export async function syncRepliesFromGmail({ force = false } = {}) {
+  const { syncAllInboxes } = await import('./inboxSync.js');
+  const result = await syncAllInboxes({ force });
+  return { ...result.replies, skipped: result.skipped, notice: result.notice };
+}
+
+/** Store and act on inbound replies for one sender. Idempotent (dedupe by Gmail message id). */
+export async function applyInboundReplies(sender, messages, { classify = classifyReply } = {}) {
   const summary = { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0 };
-
-  for (const sender of senders) {
-    let messages;
-    try {
-      messages = await listGmailInboundReplies(sender.id);
-    } catch (err) {
-      console.error(`[replies] ${sender.gmailEmail}: ${err.message}`);
-      continue;
-    }
-    await prisma.user.update({ where: { id: sender.id }, data: { lastInboxSyncAt: new Date() } });
-
+  {
     for (const message of messages) {
       summary.scanned += 1;
       const seen = await prisma.inboundReply.findUnique({ where: { gmailMessageId: message.id } });
