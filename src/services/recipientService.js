@@ -289,7 +289,7 @@ function headerMap(headers) {
 export async function importRecipientsFromCsv(
   csvText,
   listId,
-  { autoSort = false, checkDomain = checkEmailDomain } = {}
+  { autoSort = true, checkDomain = checkEmailDomain } = {}
 ) {
   const fallbackList = await getContactListById(listId);
   let records;

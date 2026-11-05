@@ -1328,18 +1328,21 @@ document.getElementById('csv-form').addEventListener('submit', async (event) => 
   }
   const file = document.getElementById('csv-file').files[0];
   const pasted = document.getElementById('csv-text').value.trim();
-  const autoSort = document.getElementById('csv-auto-sort')?.checked !== false;
+  const autoSortBox = document.getElementById('csv-auto-sort');
+  // Missing checkbox (stale HTML) still means auto-sort on.
+  const autoSort = autoSortBox ? autoSortBox.checked : true;
   const listName = contactLists.find((list) => list.id === recipientListId)?.name || 'this list';
   try {
     let summary;
+    const importPath = `/recipients/import?autoSort=${autoSort ? 'true' : 'false'}`;
     if (file) {
       const body = new FormData();
       body.append('file', file);
       body.append('listId', recipientListId);
       body.append('autoSort', autoSort ? 'true' : 'false');
-      summary = await api('/recipients/import', { method: 'POST', body });
+      summary = await api(importPath, { method: 'POST', body });
     } else {
-      summary = await api('/recipients/import', {
+      summary = await api(importPath, {
         method: 'POST',
         body: JSON.stringify({ csv: pasted, listId: recipientListId, autoSort }),
       });
