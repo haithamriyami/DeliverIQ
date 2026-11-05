@@ -349,6 +349,16 @@
                   <label for="csv-text">Paste CSV</label>
                   <textarea id="csv-text" name="csv" rows="4" placeholder="email,name,timezone,notes"></textarea>
                 </div>
+                <div class="field full">
+                  <label class="radio-row">
+                    <input id="csv-auto-sort" type="checkbox" name="autoSort" checked />
+                    Auto-sort into lists by country and sector
+                  </label>
+                  <p class="muted" style="margin-top:6px">
+                    Reads the sector from notes (for example agency or beauty) and the country from the timezone column,
+                    then puts each contact into a list like Agencies (South Africa). Uncheck to put everything into the selected list.
+                  </p>
+                </div>
                 <div class="form-actions">
                   <button class="btn btn-primary" type="submit">Import</button>
                 </div>

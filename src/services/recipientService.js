@@ -2,6 +2,7 @@ import { parse } from 'csv-parse/sync';
 import { prisma } from '../lib/prisma.js';
 import { HttpError } from '../middleware/errorHandler.js';
 import { isValidEmailSyntax, checkEmailDomain, normalizeEmail } from '../utils/emailValidation.js';
+import { resolveImportListTarget } from '../utils/listSort.js';
 
 export async function createRecipient({ email, name, timezone, notes, listId }) {
   const normalized = normalizeEmail(email);
@@ -171,6 +172,25 @@ export async function createContactList(name) {
 
   return prisma.contactList.create({ data: { name: trimmed } });
 }
+/** Find a list by name (case insensitive) or create it. */
+export async function ensureListByName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    throw new HttpError(400, 'List name is required');
+  }
+  const existing = await prisma.contactList.findFirst({
+    where: { name: { equals: trimmed, mode: 'insensitive' } },
+  });
+  if (existing) return existing;
+  try {
+    return await prisma.contactList.create({ data: { name: trimmed } });
+  } catch {
+    return prisma.contactList.findFirst({
+      where: { name: { equals: trimmed, mode: 'insensitive' } },
+    });
+  }
+}
+
 
 export async function moveRecipient(id, listId) {
   await getRecipientById(id);
@@ -266,8 +286,12 @@ function headerMap(headers) {
   return map;
 }
 
-export async function importRecipientsFromCsv(csvText, listId) {
-  const list = await getContactListById(listId);
+export async function importRecipientsFromCsv(
+  csvText,
+  listId,
+  { autoSort = false, checkDomain = checkEmailDomain } = {}
+) {
+  const fallbackList = await getContactListById(listId);
   let records;
   try {
     records = parse(csvText, {
@@ -303,6 +327,23 @@ export async function importRecipientsFromCsv(csvText, listId) {
     skippedUnsubscribed: 0,
     skippedOtherList: 0,
     otherListName: '',
+    autoSort: Boolean(autoSort),
+    byList: {},
+  };
+
+  const bumpList = (listName) => {
+    summary.byList[listName] = (summary.byList[listName] || 0) + 1;
+  };
+
+  const listCache = new Map();
+  const resolveList = async (timezone, notes) => {
+    if (!autoSort) return fallbackList;
+    const target = resolveImportListTarget({ timezone, notes });
+    if (!target?.listName) return fallbackList;
+    if (listCache.has(target.listName)) return listCache.get(target.listName);
+    const list = await ensureListByName(target.listName);
+    listCache.set(target.listName, list);
+    return list;
   };
 
   const seenInFile = new Set();
@@ -320,7 +361,7 @@ export async function importRecipientsFromCsv(csvText, listId) {
     }
     seenInFile.add(email);
 
-    const dnsCheck = await checkEmailDomain(email);
+    const dnsCheck = await checkDomain(email);
     if (!dnsCheck.valid) {
       summary.skippedDns += 1;
       continue;
@@ -329,6 +370,7 @@ export async function importRecipientsFromCsv(csvText, listId) {
     const name = nameIndex != null ? String(row[nameIndex] || '').trim() : '';
     const timezone = tzIndex != null ? String(row[tzIndex] || '').trim() : '';
     const notes = notesIndex != null ? String(row[notesIndex] || '').trim() : '';
+    const list = await resolveList(timezone, notes);
 
     const existing = await prisma.recipient.findUnique({
       where: { email },
@@ -346,6 +388,7 @@ export async function importRecipientsFromCsv(csvText, listId) {
         },
       });
       summary.created += 1;
+      bumpList(list.name);
       continue;
     }
 
@@ -374,6 +417,7 @@ export async function importRecipientsFromCsv(csvText, listId) {
       },
     });
     summary.updated += 1;
+    bumpList(list.name);
   }
 
   return summary;
