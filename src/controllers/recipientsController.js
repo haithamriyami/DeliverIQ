@@ -111,7 +111,13 @@ export const importCsv = asyncHandler(async (req, res) => {
   }
 
   const listId = req.body?.listId || req.query.listId;
-  const summary = await recipientService.importRecipientsFromCsv(csvText, listId);
+  const autoSortRaw = req.body?.autoSort ?? req.query?.autoSort;
+  const autoSort =
+    autoSortRaw === true ||
+    autoSortRaw === 'true' ||
+    autoSortRaw === '1' ||
+    autoSortRaw === 'on';
+  const summary = await recipientService.importRecipientsFromCsv(csvText, listId, { autoSort });
   res.json(summary);
 });
 

@@ -1292,6 +1292,34 @@ document.getElementById('recipient-form').addEventListener('submit', async (even
   }
 });
 
+function formatCsvImportToast(summary, fallbackListName) {
+  const byList = summary.byList || {};
+  const listParts = Object.entries(byList)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, count]) => `${fmtNum(count)} into ${name}`);
+  const imported = summary.created || 0;
+  let message;
+  if (summary.autoSort && listParts.length) {
+    message = `Imported ${fmtNum(imported)}: ${listParts.join(', ')}`;
+  } else if (imported || summary.updated) {
+    message = `Imported ${fmtNum(imported)} new into ${fallbackListName}, ${fmtNum(summary.updated || 0)} updated`;
+  } else {
+    message = 'Imported 0';
+  }
+  const extras = [];
+  if (summary.autoSort && summary.updated) extras.push(`${fmtNum(summary.updated)} updated`);
+  if (summary.skippedInvalid) extras.push(`${fmtNum(summary.skippedInvalid)} bad address`);
+  if (summary.skippedDns) extras.push(`${fmtNum(summary.skippedDns)} bad domain`);
+  if (summary.skippedDuplicate) extras.push(`${fmtNum(summary.skippedDuplicate)} duplicate in file`);
+  if (summary.skippedBounced) extras.push(`${fmtNum(summary.skippedBounced)} bounced`);
+  if (summary.skippedUnsubscribed) extras.push(`${fmtNum(summary.skippedUnsubscribed)} unsubscribed`);
+  if (summary.skippedOtherList) {
+    extras.push(`${fmtNum(summary.skippedOtherList)} already on ${summary.otherListName || 'another list'}`);
+  }
+  if (extras.length) message = `${message}. ${extras.join(', ')}`;
+  return message;
+}
+
 document.getElementById('csv-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!recipientListId) {
@@ -1300,6 +1328,7 @@ document.getElementById('csv-form').addEventListener('submit', async (event) => 
   }
   const file = document.getElementById('csv-file').files[0];
   const pasted = document.getElementById('csv-text').value.trim();
+  const autoSort = document.getElementById('csv-auto-sort')?.checked !== false;
   const listName = contactLists.find((list) => list.id === recipientListId)?.name || 'this list';
   try {
     let summary;
@@ -1307,18 +1336,19 @@ document.getElementById('csv-form').addEventListener('submit', async (event) => 
       const body = new FormData();
       body.append('file', file);
       body.append('listId', recipientListId);
+      body.append('autoSort', autoSort ? 'true' : 'false');
       summary = await api('/recipients/import', { method: 'POST', body });
     } else {
       summary = await api('/recipients/import', {
         method: 'POST',
-        body: JSON.stringify({ csv: pasted, listId: recipientListId }),
+        body: JSON.stringify({ csv: pasted, listId: recipientListId, autoSort }),
       });
     }
-    const extra = summary.skippedOtherList
-      ? `, ${summary.skippedOtherList} already on ${summary.otherListName || 'another list'}`
-      : '';
-    showToast(`Imported ${summary.created} new into ${listName}, ${summary.updated} updated${extra}`);
+    const keepAutoSort = autoSort;
+    showToast(formatCsvImportToast(summary, listName));
     document.getElementById('csv-form').reset();
+    const box = document.getElementById('csv-auto-sort');
+    if (box) box.checked = keepAutoSort;
     await loadRecipients();
   } catch (err) {
     showToast(err.message);
