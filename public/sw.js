@@ -1,4 +1,4 @@
-const CACHE = 'deliveriq-shell-v19';
+const CACHE = 'deliveriq-shell-v20';
 const SHELL = [
   '/',
   '/index.html',

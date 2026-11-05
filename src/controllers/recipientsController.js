@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { requireOwner } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
 import * as recipientService from '../services/recipientService.js';
@@ -113,3 +114,32 @@ export const importCsv = asyncHandler(async (req, res) => {
   const summary = await recipientService.importRecipientsFromCsv(csvText, listId);
   res.json(summary);
 });
+
+const listIdSchema = z.object({
+  params: z.object({ id: z.string().uuid() }),
+  body: z.any().optional(),
+  query: z.object({ mode: z.enum(['list', 'contacts']).optional() }).passthrough().optional(),
+});
+
+export const listDeletePreview = [
+  validate(listIdSchema),
+  asyncHandler(async (req, res) => {
+    res.json(await recipientService.previewListDeletion(req.validated.params.id));
+  }),
+];
+
+export const deleteList = [
+  requireOwner,
+  validate(listIdSchema),
+  asyncHandler(async (req, res) => {
+    const mode = req.validated.query?.mode || 'list';
+    res.json(await recipientService.deleteContactList(req.validated.params.id, { mode }));
+  }),
+];
+
+export const deleteEmptyLists = [
+  requireOwner,
+  asyncHandler(async (_req, res) => {
+    res.json(await recipientService.deleteEmptyLists());
+  }),
+];
