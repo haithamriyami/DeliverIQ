@@ -378,3 +378,131 @@ export async function importRecipientsFromCsv(csvText, listId) {
 
   return summary;
 }
+
+export const UNASSIGNED_LIST_NAME = 'Unassigned';
+
+/** The list that keeps contacts whose list was deleted. Created when first needed. */
+export async function ensureUnassignedList(tx = prisma) {
+  const existing = await tx.contactList.findFirst({
+    where: { name: { equals: UNASSIGNED_LIST_NAME, mode: 'insensitive' } },
+  });
+  if (existing) return existing;
+  try {
+    return await tx.contactList.create({ data: { name: UNASSIGNED_LIST_NAME } });
+  } catch {
+    return tx.contactList.findFirst({ where: { name: UNASSIGNED_LIST_NAME } });
+  }
+}
+
+/** Contacts that must never be deleted: on an unfinished campaign, or suppressed. */
+async function protectedContactIds(recipients) {
+  const ids = recipients.map((row) => row.id);
+  const assignments = await campaignAssignmentsForRecipients(ids);
+  const inCampaigns = new Set();
+  for (const [id, campaigns] of assignments) {
+    if (campaigns.some((campaign) => campaign.status !== 'completed')) inCampaigns.add(id);
+  }
+  // Paused campaigns are not finished either.
+  const pausedRows = await prisma.campaign.findMany({
+    where: { pausedAt: { not: null } },
+    select: { recipientIds: true },
+  });
+  for (const campaign of pausedRows) {
+    for (const id of campaign.recipientIds) if (ids.includes(id)) inCampaigns.add(id);
+  }
+  const suppressed = new Set(
+    recipients
+      .filter((row) => row.status === 'bounced' || row.status === 'unsubscribed' || row.doNotContact)
+      .map((row) => row.id)
+  );
+  return { inCampaigns, suppressed };
+}
+
+/** What deleting this list would do. Used by the confirm dialog. */
+export async function previewListDeletion(id) {
+  const list = await getContactListById(id);
+  const recipients = await prisma.recipient.findMany({
+    where: { listId: list.id },
+    select: { id: true, status: true, doNotContact: true },
+  });
+  const { inCampaigns, suppressed } = await protectedContactIds(recipients);
+  const kept = new Set([...inCampaigns, ...suppressed]);
+  return {
+    id: list.id,
+    name: list.name,
+    total: recipients.length,
+    inActiveCampaigns: inCampaigns.size,
+    suppressed: suppressed.size,
+    deletable: recipients.length - kept.size,
+    isUnassigned: list.name.toLowerCase() === UNASSIGNED_LIST_NAME.toLowerCase(),
+  };
+}
+
+/**
+ * Delete a list.
+ * - empty list: deleted.
+ * - mode 'list': contacts move to Unassigned, then the list is deleted.
+ * - mode 'contacts': contacts are deleted too, EXCEPT contacts on an unfinished campaign
+ *   and suppression records (bounced, unsubscribed, do not contact). Those move to
+ *   Unassigned so they are still never emailed.
+ */
+export async function deleteContactList(id, { mode = 'list' } = {}) {
+  const list = await getContactListById(id);
+  const recipients = await prisma.recipient.findMany({
+    where: { listId: list.id },
+    select: { id: true, status: true, doNotContact: true },
+  });
+  const isUnassigned = list.name.toLowerCase() === UNASSIGNED_LIST_NAME.toLowerCase();
+
+  if (recipients.length === 0) {
+    await prisma.contactList.delete({ where: { id: list.id } });
+    return { deleted: true, name: list.name, contactsDeleted: 0, contactsMoved: 0, keptInCampaigns: 0, keptSuppressed: 0 };
+  }
+
+  if (mode !== 'list' && mode !== 'contacts') {
+    throw new HttpError(400, 'Choose whether to keep or delete the contacts');
+  }
+
+  const { inCampaigns, suppressed } = await protectedContactIds(recipients);
+  const keep = mode === 'list' ? recipients.map((row) => row.id) : recipients.filter((row) => inCampaigns.has(row.id) || suppressed.has(row.id)).map((row) => row.id);
+  const remove = mode === 'list' ? [] : recipients.filter((row) => !inCampaigns.has(row.id) && !suppressed.has(row.id)).map((row) => row.id);
+
+  if (isUnassigned && keep.length) {
+    throw new HttpError(
+      400,
+      `${keep.length} contacts in Unassigned are on unfinished campaigns or must stay blocked, so this list cannot be removed. Move them to another list first.`
+    );
+  }
+
+  return prisma.$transaction(async (tx) => {
+    let moved = 0;
+    if (keep.length) {
+      const target = await ensureUnassignedList(tx);
+      moved = (await tx.recipient.updateMany({ where: { id: { in: keep } }, data: { listId: target.id } })).count;
+    }
+    const deletedCount = remove.length ? (await tx.recipient.deleteMany({ where: { id: { in: remove } } })).count : 0;
+    await tx.contactList.delete({ where: { id: list.id } });
+    return {
+      deleted: true,
+      name: list.name,
+      contactsDeleted: deletedCount,
+      contactsMoved: moved,
+      keptInCampaigns: mode === 'contacts' ? inCampaigns.size : 0,
+      keptSuppressed: mode === 'contacts' ? [...suppressed].filter((sid) => !inCampaigns.has(sid)).length : 0,
+    };
+  });
+}
+
+/** Delete every list that has no contacts. Keeps at least one list. */
+export async function deleteEmptyLists() {
+  const lists = await prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
+  const grouped = await prisma.recipient.groupBy({ by: ['listId'], _count: { _all: true } });
+  const counts = new Map(grouped.map((row) => [row.listId, row._count._all]));
+  let empty = lists.filter((list) => !counts.get(list.id));
+  if (empty.length === lists.length) empty = empty.slice(1); // never remove the last list
+  if (!empty.length) return { deleted: 0, names: [] };
+  const result = await prisma.contactList.deleteMany({
+    where: { id: { in: empty.map((list) => list.id) }, recipients: { none: {} } },
+  });
+  return { deleted: result.count, names: empty.map((list) => list.name) };
+}

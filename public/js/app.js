@@ -403,12 +403,79 @@ async function loadContactLists() {
 function renderContactListChips() {
   const host = document.getElementById('contact-lists');
   if (!host) return;
+  const owner = currentUser?.role === 'owner';
   host.innerHTML = contactLists
     .map(
       (list) =>
-        `<button class="btn btn-ghost btn-small${list.id === recipientListId ? ' is-active' : ''}" type="button" data-contact-list="${list.id}">${escapeHtml(list.name)} (${fmtNum(list.recipientCount)})</button>`
+        `<span class="list-chip"><button class="btn btn-ghost btn-small chip-main${owner ? ' has-delete' : ''}${list.id === recipientListId ? ' is-active' : ''}" type="button" data-contact-list="${list.id}">${escapeHtml(list.name)} (${fmtNum(list.recipientCount)})</button>${
+          owner
+            ? `<button class="btn btn-ghost btn-small chip-delete" type="button" data-delete-list="${list.id}" title="Delete ${escapeHtml(list.name)}" aria-label="Delete list ${escapeHtml(list.name)}">&times;</button>`
+            : ''
+        }</span>`
     )
     .join('');
+  const emptyBtn = document.getElementById('delete-empty-lists-btn');
+  if (emptyBtn) emptyBtn.hidden = !owner || !contactLists.some((list) => !list.recipientCount);
+}
+
+let pendingDeleteList = null;
+
+function closeDeleteListModal() {
+  const modal = document.getElementById('delete-list-modal');
+  if (modal) modal.hidden = true;
+  pendingDeleteList = null;
+}
+
+async function afterListDeleted(id, message) {
+  if (recipientListId === id) recipientListId = '';
+  if (campaignListId === id) campaignListId = '';
+  showToast(message);
+  await loadRecipients();
+}
+
+async function startDeleteList(id) {
+  try {
+    const preview = await api(`/recipients/lists/${id}/delete-preview`);
+    if (!preview.total) {
+      if (!confirm(`Delete the list "${preview.name}"? It has no contacts.`)) return;
+      await api(`/recipients/lists/${id}?mode=list`, { method: 'DELETE' });
+      await afterListDeleted(id, `Deleted ${preview.name}`);
+      return;
+    }
+    pendingDeleteList = preview;
+    document.getElementById('delete-list-title').textContent = `Delete ${preview.name}`;
+    document.getElementById('delete-list-summary').textContent =
+      `${preview.name} has ${fmtNum(preview.total)} contact${preview.total === 1 ? '' : 's'}. What should happen to them?`;
+    const keptParts = [];
+    if (preview.inActiveCampaigns) keptParts.push(`${fmtNum(preview.inActiveCampaigns)} on campaigns that are not finished`);
+    if (preview.suppressed) keptParts.push(`${fmtNum(preview.suppressed)} bounced, unsubscribed or marked do not contact`);
+    document.getElementById('delete-list-protect').textContent =
+      `Keep contacts: they move to Unassigned. Delete contacts: ${fmtNum(preview.deletable)} will be deleted, along with their send history.` +
+      (keptParts.length
+        ? ` These are never deleted and move to Unassigned instead: ${keptParts.join('; ')}. Blocked contacts stay blocked and are never emailed.`
+        : '');
+    document.getElementById('delete-list-all').hidden = preview.deletable === 0;
+    document.getElementById('delete-list-keep').hidden = preview.isUnassigned;
+    document.getElementById('delete-list-modal').hidden = false;
+  } catch (err) {
+    showToast(err.message);
+  }
+}
+
+async function finishDeleteList(mode) {
+  const preview = pendingDeleteList;
+  if (!preview) return;
+  if (mode === 'contacts' && !confirm(`Permanently delete ${fmtNum(preview.deletable)} contacts from ${preview.name}? This cannot be undone.`)) return;
+  try {
+    const result = await api(`/recipients/lists/${preview.id}?mode=${mode}`, { method: 'DELETE' });
+    closeDeleteListModal();
+    const parts = [`Deleted ${result.name}`];
+    if (result.contactsDeleted) parts.push(`${fmtNum(result.contactsDeleted)} contacts deleted`);
+    if (result.contactsMoved) parts.push(`${fmtNum(result.contactsMoved)} contacts moved to Unassigned`);
+    await afterListDeleted(preview.id, parts.join('. '));
+  } catch (err) {
+    showToast(err.message);
+  }
 }
 
 function listOptionsHtml(selectedId) {
@@ -1302,6 +1369,36 @@ document.addEventListener('click', async (event) => {
   if (event.target.id === 'hide-audience-btn' || event.target.id === 'hide-bounces-btn') {
     const card = document.getElementById('campaign-audience-card');
     if (card) card.hidden = true;
+    return;
+  }
+  const deleteListBtn = event.target.closest('[data-delete-list]');
+  if (deleteListBtn) {
+    await startDeleteList(deleteListBtn.dataset.deleteList);
+    return;
+  }
+  if (event.target.closest('[data-delete-list-cancel]')) {
+    closeDeleteListModal();
+    return;
+  }
+  if (event.target.id === 'delete-list-keep' || event.target.id === 'delete-list-all') {
+    await finishDeleteList(event.target.id === 'delete-list-all' ? 'contacts' : 'list');
+    return;
+  }
+  if (event.target.id === 'delete-empty-lists-btn') {
+    const empty = contactLists.filter((list) => !list.recipientCount);
+    if (!empty.length) {
+      showToast('There are no empty lists.');
+      return;
+    }
+    if (!confirm(`Delete ${empty.length} empty list${empty.length === 1 ? '' : 's'}? ${empty.map((list) => list.name).join(', ')}`)) return;
+    try {
+      const result = await api('/recipients/lists/empty', { method: 'DELETE' });
+      showToast(`Deleted ${fmtNum(result.deleted)} empty list${result.deleted === 1 ? '' : 's'}`);
+      recipientListId = '';
+      await loadRecipients();
+    } catch (err) {
+      showToast(err.message);
+    }
     return;
   }
   const listChip = event.target.closest('[data-contact-list]');

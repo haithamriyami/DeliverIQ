@@ -1102,3 +1102,9 @@ tr:last-child td {
 .sending-meter { margin-bottom: 12px; font-size: 13px; }
 .badge.paused { background: #fde2e1; color: #9b1c1c; }
 .badge.queued { background: #e8f0ff; color: #1d4ed8; }
+
+.list-chip { display: inline-flex; align-items: stretch; margin: 0 6px 6px 0; }
+.list-chip .btn { margin: 0; }
+.list-chip .chip-delete { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 8px; color: #b42318; margin-left: -1px; }
+.list-chip .chip-main.has-delete { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.delete-list-actions { flex-wrap: wrap; gap: 8px; }

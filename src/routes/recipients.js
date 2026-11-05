@@ -11,6 +11,9 @@ const router = Router();
 
 router.get('/lists', recipientsController.lists);
 router.post('/lists', ...recipientsController.createList);
+router.delete('/lists/empty', ...recipientsController.deleteEmptyLists);
+router.get('/lists/:id/delete-preview', ...recipientsController.listDeletePreview);
+router.delete('/lists/:id', ...recipientsController.deleteList);
 router.post('/', ...recipientsController.create);
 router.get('/', recipientsController.list);
 router.delete('/bounced', recipientsController.removeBounced);

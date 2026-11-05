@@ -325,6 +325,7 @@
             <div class="filter-row" id="contact-list-row">
               <div class="list-chips" id="contact-lists"></div>
               <button class="btn btn-ghost btn-small" type="button" id="new-list-btn">+ New list</button>
+              <button class="btn btn-ghost btn-small owner-only" type="button" id="delete-empty-lists-btn">Delete empty lists</button>
             </div>
             <div class="filter-row" id="recipient-filters">
               <button class="btn btn-ghost btn-small is-active" type="button" data-recipient-filter="">All</button>
@@ -553,6 +554,21 @@
             <button class="btn btn-primary" type="submit">Create follow-up</button>
           </div>
         </form>
+      </article>
+    </div>
+    <div class="modal-backdrop" id="delete-list-modal" hidden>
+      <article class="card modal-card" role="dialog" aria-labelledby="delete-list-title">
+        <div class="card-head">
+          <h2 id="delete-list-title">Delete list</h2>
+          <button class="btn btn-ghost btn-small" type="button" data-delete-list-cancel>Close</button>
+        </div>
+        <p id="delete-list-summary"></p>
+        <p class="muted" id="delete-list-protect"></p>
+        <div class="form-actions delete-list-actions">
+          <button class="btn btn-ghost" type="button" data-delete-list-cancel>Cancel</button>
+          <button class="btn btn-ghost" type="button" id="delete-list-keep">Delete list, keep contacts</button>
+          <button class="btn btn-danger" type="button" id="delete-list-all">Delete list and contacts</button>
+        </div>
       </article>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
