@@ -111,15 +111,22 @@ export const importCsv = asyncHandler(async (req, res) => {
   }
 
   const listId = req.body?.listId || req.query.listId;
-  const autoSortRaw = req.body?.autoSort ?? req.query?.autoSort;
-  const autoSort =
-    autoSortRaw === true ||
-    autoSortRaw === 'true' ||
-    autoSortRaw === '1' ||
-    autoSortRaw === 'on';
+  // Default ON. Only an explicit off value disables it. Missing field used to
+  // silently fall back to the selected list (stale JS / multipart clients).
+  const autoSort = parseAutoSortFlag(req.body?.autoSort ?? req.query?.autoSort, true);
   const summary = await recipientService.importRecipientsFromCsv(csvText, listId, { autoSort });
   res.json(summary);
 });
+
+/** Multipart sends strings; JSON may send booleans. Missing means use the default. */
+export function parseAutoSortFlag(raw, defaultValue = true) {
+  if (raw === undefined || raw === null || raw === '') return defaultValue;
+  if (raw === true || raw === false) return raw;
+  const value = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  return defaultValue;
+}
 
 const listIdSchema = z.object({
   params: z.object({ id: z.string().uuid() }),

@@ -1,4 +1,4 @@
-const CACHE = 'deliveriq-shell-v21';
+const CACHE = 'deliveriq-shell-v22';
 const SHELL = [
   '/',
   '/index.html',
@@ -54,8 +54,27 @@ self.addEventListener('fetch', (event) => {
     url.pathname.startsWith('/t/') ||
     url.pathname === '/health';
 
-  if (req.mode === 'navigate') {
-    event.respondWith(fetch(req).catch(() => caches.match('/index.html')));
+  // HTML and app JS must stay in sync (auto-sort checkbox + handler). Always
+  // try the network first so a fresh page never runs a stale /js/app.js.
+  const isShellCode =
+    url.pathname === '/' ||
+    url.pathname === '/index.html' ||
+    url.pathname === '/js/app.js' ||
+    url.pathname === '/css/app.css' ||
+    url.pathname === '/sw.js';
+
+  if (req.mode === 'navigate' || isShellCode) {
+    event.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((cache) => cache.put(req, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then((cached) => cached || caches.match('/index.html')))
+    );
     return;
   }
 

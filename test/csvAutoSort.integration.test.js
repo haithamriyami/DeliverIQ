@@ -73,6 +73,17 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
   });
   assert.equal(x1.list.name, 'Agencies');
 
+  // Default (no autoSort option) still auto-sorts.
+  const defaultCsv = [
+    'email,name,timezone,notes',
+    'def1@example.com,Default,Canada,named | agency | Canada | https://def.test',
+  ].join('\n');
+  const defSummary = await rs.importRecipientsFromCsv(defaultCsv, agencies.id, {
+    checkDomain: alwaysOk,
+  });
+  assert.equal(defSummary.autoSort, true);
+  assert.equal(defSummary.byList['Agencies (Canada)'], 1);
+
   // Off path: autoSort false dumps everything into the selected list.
   const plainCsv = [
     'email,name,timezone,notes',
