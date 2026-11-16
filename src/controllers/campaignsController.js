@@ -49,13 +49,14 @@ export const create = [
     const campaign = await campaignService.createCampaign({
       ...req.validated.body,
       createdById: req.user.id,
+      workspaceId: req.user.workspaceId,
     });
     res.status(201).json(campaign);
   }),
 ];
 
-export const list = asyncHandler(async (_req, res) => {
-  const campaigns = await campaignService.listCampaignsWithStats();
+export const list = asyncHandler(async (req, res) => {
+  const campaigns = await campaignService.listCampaignsWithStats(req.user.workspaceId);
   res.json(campaigns);
 });
 
@@ -64,14 +65,15 @@ export const send = [
   asyncHandler(async (req, res) => {
     const result = await campaignService.enqueueCampaign(
       req.validated.params.id,
-      req.validated.body?.stepId
+      req.validated.body?.stepId,
+      req.user.workspaceId
     );
     // First email already went out inside enqueueCampaign if the slot was free.
     // Keep sending on the server after this response, even if the tab is closed.
     const background = result.remaining > 0 ? kickBackgroundSender() : false;
     let estimatedFinish = null;
     if (result.remaining > 0) {
-      const status = await sendingStatus().catch(() => null);
+      const status = await sendingStatus(req.user.workspaceId).catch(() => null);
       estimatedFinish = status?.senders?.find((row) => row.queued > 0)?.estimatedFinish || null;
     }
     res.json({
@@ -98,6 +100,7 @@ export const followUp = [
     const result = await campaignService.createFollowUp({
       campaignId: req.validated.params.id,
       ...req.validated.body,
+      workspaceId: req.user.workspaceId,
     });
     res.status(201).json(result);
   }),
@@ -106,7 +109,7 @@ export const followUp = [
 export const report = [
   validate(campaignIdSchema),
   asyncHandler(async (req, res) => {
-    const report = await campaignService.getCampaignReport(req.validated.params.id);
+    const report = await campaignService.getCampaignReport(req.validated.params.id, req.user.workspaceId);
     res.json(report);
   }),
 ];
@@ -125,6 +128,7 @@ export const testSend = [
     const result = await campaignService.sendTestEmail({
       campaignId: req.validated.params.id,
       to: req.validated.body.email,
+      workspaceId: req.user.workspaceId,
     });
     res.json(result);
   }),
@@ -141,7 +145,8 @@ export const audience = [
     const rows = await campaignService.listCampaignAudience(
       req.validated.params.id,
       kind,
-      typeof req.query.stepId === 'string' ? req.query.stepId : undefined
+      typeof req.query.stepId === 'string' ? req.query.stepId : undefined,
+      req.user.workspaceId
     );
     res.json(rows);
   }),
@@ -150,7 +155,7 @@ export const audience = [
 export const syncBounces = asyncHandler(async (req, res) => {
   try {
     const force = req.query?.force === '1' || req.body?.force === true;
-    const result = await campaignService.syncBouncesFromGmail({ force });
+    const result = await campaignService.syncBouncesFromGmail({ force, workspaceId: req.user.workspaceId });
     res.json(result);
   } catch (err) {
     if (err.status === 403) {
@@ -166,7 +171,7 @@ export const syncBounces = asyncHandler(async (req, res) => {
 export const remove = [
   validate(campaignIdSchema),
   asyncHandler(async (req, res) => {
-    await campaignService.deleteCampaign(req.validated.params.id);
+    await campaignService.deleteCampaign(req.validated.params.id, req.user.workspaceId);
     res.json({ ok: true });
   }),
 ];

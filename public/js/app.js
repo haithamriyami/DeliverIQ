@@ -85,12 +85,20 @@ function statusBadge(status, pending = 0, paused = false) {
   return `<span class="badge ${cls}">${label}</span>`;
 }
 
+// The workspace this page is showing. Sent with every request so the server refuses
+// a write if another tab switched workspace in the meantime.
+let currentWorkspaceId = null;
+
 async function api(path, options = {}) {
   const isForm = options.body instanceof FormData;
+  const headers = isForm ? { ...(options.headers || {}) } : { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (currentWorkspaceId) {
+    headers['X-Workspace-Id'] = currentWorkspaceId;
+  }
   const res = await fetch(path, {
     credentials: 'include',
-    headers: isForm ? options.headers : { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
+    headers,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -144,7 +152,8 @@ function currentPage() {
 function setAuthMode(mode, { email = '', workspace = '' } = {}) {
   const form = document.getElementById('auth-form');
   form.mode.value = mode;
-  const showWorkspace = mode === 'register' && setupRequired;
+  // Every new account gets its own workspace, so always ask for its name on sign up.
+  const showWorkspace = mode === 'register';
   document.getElementById('auth-name-field').hidden = mode === 'login';
   document.getElementById('auth-workspace-field').hidden = !showWorkspace;
   document.getElementById('auth-name').required = mode !== 'login';
@@ -158,7 +167,7 @@ function setAuthMode(mode, { email = '', workspace = '' } = {}) {
     login: ['Log in', 'Welcome back to DeliverIQ.', 'Log in'],
     register: setupRequired
       ? ['Create account', 'You’re first, so this account becomes the owner.', 'Create account']
-      : ['Create account', 'Join the workspace to send and track campaigns.', 'Create account'],
+      : ['Create account', 'You get your own workspace. To join a team, use their invite link.', 'Create account'],
     invite: ['Join workspace', 'Create your password to join the team.', 'Join team'],
   };
   const [title, lede, submit] = titles[mode];
@@ -185,6 +194,8 @@ function setAuthMode(mode, { email = '', workspace = '' } = {}) {
 
 function unlockApp(user) {
   currentUser = user;
+  currentWorkspaceId = user.workspaceId || null;
+  loadWorkspaceSwitcher().catch(() => {});
   document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('locked');
   document.getElementById('hello-name').textContent = `Hello, ${user.name}`;
@@ -192,8 +203,49 @@ function unlockApp(user) {
   showPage(currentPage());
 }
 
+/** Fill the workspace picker in the top bar. */
+async function loadWorkspaceSwitcher() {
+  const select = document.getElementById('workspace-switch');
+  if (!select) return;
+  const data = await api('/auth/workspaces');
+  select.innerHTML = [
+    ...data.workspaces.map(
+      (ws) => `<option value="${escapeHtml(ws.id)}"${ws.id === data.activeWorkspaceId ? ' selected' : ''}>${escapeHtml(ws.name)}</option>`
+    ),
+    '<option value="__new">+ New workspace</option>',
+  ].join('');
+  select.dataset.active = data.activeWorkspaceId;
+}
+
+async function switchWorkspaceTo(value) {
+  const select = document.getElementById('workspace-switch');
+  try {
+    if (value === '__new') {
+      const name = (window.prompt('Name for the new workspace, for example Fiverr clients') || '').trim();
+      if (!name) {
+        select.value = select.dataset.active || '';
+        return;
+      }
+      await api('/auth/workspaces', { method: 'POST', body: JSON.stringify({ name }) });
+    } else {
+      await api('/auth/workspaces/switch', { method: 'POST', body: JSON.stringify({ workspaceId: value }) });
+    }
+    // Reload so nothing from the previous workspace stays on screen.
+    location.hash = 'dashboard';
+    location.reload();
+  } catch (err) {
+    select.value = select.dataset.active || '';
+    showToast(err.message);
+  }
+}
+
+document.getElementById('workspace-switch')?.addEventListener('change', (event) => {
+  switchWorkspaceTo(event.target.value);
+});
+
 function lockApp() {
   currentUser = null;
+  currentWorkspaceId = null;
   document.getElementById('auth-screen').classList.remove('hidden');
   document.getElementById('app').classList.add('locked');
 }

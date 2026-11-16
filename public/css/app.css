@@ -1108,3 +1108,38 @@ tr:last-child td {
 .list-chip .chip-delete { border-top-left-radius: 0; border-bottom-left-radius: 0; padding: 0 8px; color: #b42318; margin-left: -1px; }
 .list-chip .chip-main.has-delete { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .delete-list-actions { flex-wrap: wrap; gap: 8px; }
+
+/* Workspace picker in the top bar. */
+.workspace-switch {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 700;
+  max-width: 200px;
+  cursor: pointer;
+}
+
+.workspace-switch option {
+  color: #0f172a;
+}
+
+.app.locked .workspace-switch {
+  visibility: hidden;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Fields toggled with the hidden attribute must actually disappear (.field sets display). */
+.field[hidden] {
+  display: none;
+}

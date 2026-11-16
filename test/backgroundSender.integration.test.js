@@ -37,11 +37,12 @@ test('background run keeps sending at the gap, one run at a time, overlap never 
   const user = await prisma.user.create({
     data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: encToken },
   });
-  const list = await prisma.contactList.create({ data: { name: 'L' } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi</p>' } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
   const ids = [];
-  for (let i = 0; i < 8; i += 1) ids.push((await prisma.recipient.create({ data: { email: `p${i}@x.dev`, name: 'P', listId: list.id } })).id);
-  const c = await cs.createCampaign({ name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: ids, listId: list.id, createdById: user.id });
+  for (let i = 0; i < 8; i += 1) ids.push((await prisma.recipient.create({ data: { workspaceId: ws.id, email: `p${i}@x.dev`, name: 'P', listId: list.id } })).id);
+  const c = await cs.createCampaign({ workspaceId: ws.id, name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: ids, listId: list.id, createdById: user.id });
 
   // Lease: only one holder until it is released or expires.
   assert.equal(await bg.acquireLease('a', 60000), true);

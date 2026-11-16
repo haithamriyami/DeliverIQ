@@ -17,22 +17,23 @@ export const create = [
   validate(createTemplateSchema),
   asyncHandler(async (req, res) => {
     const template = await prisma.template.create({
-      data: req.validated.body,
+      data: { ...req.validated.body, workspaceId: req.user.workspaceId },
     });
     res.status(201).json(template);
   }),
 ];
 
-export const list = asyncHandler(async (_req, res) => {
+export const list = asyncHandler(async (req, res) => {
   const templates = await prisma.template.findMany({
+    where: { workspaceId: req.user.workspaceId },
     orderBy: { createdAt: 'desc' },
   });
   res.json(templates);
 });
 
 export const getById = asyncHandler(async (req, res) => {
-  const template = await prisma.template.findUnique({
-    where: { id: req.params.id },
+  const template = await prisma.template.findFirst({
+    where: { id: String(req.params.id), workspaceId: req.user.workspaceId },
   });
 
   if (!template) {
@@ -60,8 +61,8 @@ const updateTemplateSchema = z.object({
 export const update = [
   validate(updateTemplateSchema),
   asyncHandler(async (req, res) => {
-    const existing = await prisma.template.findUnique({
-      where: { id: req.validated.params.id },
+    const existing = await prisma.template.findFirst({
+      where: { id: req.validated.params.id, workspaceId: req.user.workspaceId },
     });
     if (!existing) {
       throw new HttpError(404, 'Template not found');
@@ -77,6 +78,12 @@ export const update = [
 export const remove = [
   validate(templateIdSchema),
   asyncHandler(async (req, res) => {
+    const existing = await prisma.template.findFirst({
+      where: { id: req.validated.params.id, workspaceId: req.user.workspaceId },
+    });
+    if (!existing) {
+      throw new HttpError(404, 'Template not found');
+    }
     const used = await prisma.campaign.count({
       where: { templateId: req.validated.params.id },
     });
@@ -85,12 +92,6 @@ export const remove = [
         409,
         `This template is used by ${used} campaign${used === 1 ? '' : 's'}. Delete those campaigns first.`
       );
-    }
-    const existing = await prisma.template.findUnique({
-      where: { id: req.validated.params.id },
-    });
-    if (!existing) {
-      throw new HttpError(404, 'Template not found');
     }
     await prisma.template.delete({ where: { id: req.validated.params.id } });
     res.json({ ok: true });

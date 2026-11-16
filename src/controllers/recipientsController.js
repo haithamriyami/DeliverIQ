@@ -36,7 +36,7 @@ const moveRecipientSchema = z.object({
 export const create = [
   validate(createRecipientSchema),
   asyncHandler(async (req, res) => {
-    const recipient = await recipientService.createRecipient(req.validated.body);
+    const recipient = await recipientService.createRecipient({ ...req.validated.body, workspaceId: req.user.workspaceId });
     res.status(201).json(recipient);
   }),
 ];
@@ -46,6 +46,7 @@ export const list = asyncHandler(async (req, res) => {
   const allowed = ['active', 'bounced', 'unsubscribed'];
   const listId = typeof req.query.listId === 'string' ? req.query.listId : undefined;
   const recipients = await recipientService.listRecipients(
+    req.user.workspaceId,
     allowed.includes(status) ? status : undefined,
     req.query.q,
     listId
@@ -53,15 +54,15 @@ export const list = asyncHandler(async (req, res) => {
   res.json(recipients);
 });
 
-export const lists = asyncHandler(async (_req, res) => {
-  const rows = await recipientService.listContactLists();
+export const lists = asyncHandler(async (req, res) => {
+  const rows = await recipientService.listContactLists(req.user.workspaceId);
   res.json(rows);
 });
 
 export const createList = [
   validate(createListSchema),
   asyncHandler(async (req, res) => {
-    const list = await recipientService.createContactList(req.validated.body.name);
+    const list = await recipientService.createContactList(req.user.workspaceId, req.validated.body.name);
     res.status(201).json(list);
   }),
 ];
@@ -76,6 +77,7 @@ export const move = [
   validate(moveRecipientSchema),
   asyncHandler(async (req, res) => {
     const recipient = await recipientService.moveRecipient(
+      req.user.workspaceId,
       req.validated.params.id,
       req.validated.body.listId
     );
@@ -86,14 +88,14 @@ export const move = [
 export const remove = [
   validate(recipientIdSchema),
   asyncHandler(async (req, res) => {
-    await recipientService.deleteRecipient(req.validated.params.id);
+    await recipientService.deleteRecipient(req.user.workspaceId, req.validated.params.id);
     res.json({ ok: true });
   }),
 ];
 
 export const removeBounced = asyncHandler(async (req, res) => {
   const listId = typeof req.query.listId === 'string' ? req.query.listId : undefined;
-  const result = await recipientService.deleteBouncedRecipients(listId);
+  const result = await recipientService.deleteBouncedRecipients(req.user.workspaceId, listId);
   res.json(result);
 });
 
@@ -114,7 +116,7 @@ export const importCsv = asyncHandler(async (req, res) => {
   // Default ON. Only an explicit off value disables it. Missing field used to
   // silently fall back to the selected list (stale JS / multipart clients).
   const autoSort = parseAutoSortFlag(req.body?.autoSort ?? req.query?.autoSort, true);
-  const summary = await recipientService.importRecipientsFromCsv(csvText, listId, { autoSort });
+  const summary = await recipientService.importRecipientsFromCsv(csvText, listId, { autoSort, workspaceId: req.user.workspaceId });
   res.json(summary);
 });
 
@@ -137,7 +139,7 @@ const listIdSchema = z.object({
 export const listDeletePreview = [
   validate(listIdSchema),
   asyncHandler(async (req, res) => {
-    res.json(await recipientService.previewListDeletion(req.validated.params.id));
+    res.json(await recipientService.previewListDeletion(req.user.workspaceId, req.validated.params.id));
   }),
 ];
 
@@ -146,13 +148,13 @@ export const deleteList = [
   validate(listIdSchema),
   asyncHandler(async (req, res) => {
     const mode = req.validated.query?.mode || 'list';
-    res.json(await recipientService.deleteContactList(req.validated.params.id, { mode }));
+    res.json(await recipientService.deleteContactList(req.user.workspaceId, req.validated.params.id, { mode }));
   }),
 ];
 
 export const deleteEmptyLists = [
   requireOwner,
-  asyncHandler(async (_req, res) => {
-    res.json(await recipientService.deleteEmptyLists());
+  asyncHandler(async (req, res) => {
+    res.json(await recipientService.deleteEmptyLists(req.user.workspaceId));
   }),
 ];

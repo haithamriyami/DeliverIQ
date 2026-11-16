@@ -37,8 +37,13 @@ model Workspace {
   name      String
   createdAt DateTime @default(now()) @map("created_at")
 
-  users   User[]
-  invites Invite[]
+  users      User[]
+  invites    Invite[]
+  members    WorkspaceMember[]
+  recipients Recipient[]
+  lists      ContactList[]
+  templates  Template[]
+  campaigns  Campaign[]
 
   gmailEmail        String?   @map("gmail_email")
   gmailRefreshToken String?   @map("gmail_refresh_token")
@@ -60,7 +65,9 @@ model User {
   email        String   @unique
   name         String
   passwordHash String   @map("password_hash")
+  // Role in the default workspace. The real role is per workspace in workspace_members.
   role         UserRole @default(member)
+  // Default (last used) workspace. Which workspace a session works in is in the login token.
   workspaceId  String   @map("workspace_id")
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -83,12 +90,29 @@ model User {
   // Short send backoff after a per minute Gmail quota error (never a pause).
   sendBackoffCount     Int       @default(0) @map("send_backoff_count")
 
-  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  campaigns Campaign[]
-  sends     CampaignRecipient[]
-  replies   InboundReply[]
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  memberships WorkspaceMember[]
+  campaigns   Campaign[]
+  sends       CampaignRecipient[]
+  replies     InboundReply[]
 
   @@map("users")
+}
+
+/// A user can belong to many workspaces, with a role in each.
+model WorkspaceMember {
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  userId      String   @map("user_id")
+  role        UserRole @default(member)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@map("workspace_members")
 }
 
 model Invite {
@@ -110,7 +134,8 @@ model Invite {
 
 model Recipient {
   id                 String          @id @default(uuid())
-  email              String          @unique
+  workspaceId        String          @map("workspace_id")
+  email              String
   name               String
   status             RecipientStatus @default(active)
   timezone           String          @default("UTC")
@@ -122,39 +147,50 @@ model Recipient {
   listId             String          @map("list_id")
   createdAt          DateTime        @default(now()) @map("created_at")
 
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   list               ContactList         @relation(fields: [listId], references: [id], onDelete: Restrict)
   campaignRecipients CampaignRecipient[]
   replies            InboundReply[]
 
+  @@unique([workspaceId, email])
   @@index([listId])
   @@map("recipients")
 }
 
 model ContactList {
-  id        String   @id @default(uuid())
-  name      String   @unique
-  createdAt DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  name        String
+  createdAt   DateTime @default(now()) @map("created_at")
 
+  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   recipients Recipient[]
   campaigns  Campaign[]
+
+  @@unique([workspaceId, name])
 
   @@map("contact_lists")
 }
 
 model Template {
-  id        String   @id @default(uuid())
-  name      String
-  body      String
-  createdAt DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  workspaceId String   @map("workspace_id")
+  name        String
+  body        String
+  createdAt   DateTime @default(now()) @map("created_at")
 
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   campaigns Campaign[]
   steps     CampaignStep[]
+
+  @@index([workspaceId])
 
   @@map("templates")
 }
 
 model Campaign {
   id           String         @id @default(uuid())
+  workspaceId  String         @map("workspace_id")
   name         String
   subject      String
   templateId   String         @map("template_id")
@@ -168,6 +204,7 @@ model Campaign {
   pausedAt     DateTime?      @map("paused_at")
   pausedReason String         @default("") @map("paused_reason")
 
+  workspace          Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
   template           Template             @relation(fields: [templateId], references: [id])
   replies            InboundReply[]
   createdBy          User?                @relation(fields: [createdById], references: [id], onDelete: SetNull)
@@ -175,6 +212,7 @@ model Campaign {
   steps              CampaignStep[]
   campaignRecipients CampaignRecipient[]
 
+  @@index([workspaceId])
   @@map("campaigns")
 }
 

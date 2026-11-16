@@ -63,8 +63,8 @@ export const tick = asyncHandler(async (_req, res) => {
   res.json({ ok: true, sent: result.results.filter((row) => row.sent).length });
 });
 
-export const status = asyncHandler(async (_req, res) => {
-  res.json(await scheduler.sendingStatus());
+export const status = asyncHandler(async (req, res) => {
+  res.json(await scheduler.sendingStatus(req.user.workspaceId));
 });
 
 const resumeSenderSchema = z.object({
@@ -80,6 +80,12 @@ export const resumeSender = [
     if (req.user.role !== 'owner' && req.user.id !== userId) {
       throw new HttpError(403, 'Only the owner or the account holder can resume this sender');
     }
+    const member = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId: req.user.workspaceId, userId } },
+    });
+    if (!member) {
+      throw new HttpError(404, 'Sender not found in this workspace');
+    }
     await scheduler.resumeSender(userId);
     res.json({ ok: true });
   }),
@@ -94,6 +100,7 @@ const campaignIdSchema = z.object({
 export const resumeCampaign = [
   validate(campaignIdSchema),
   asyncHandler(async (req, res) => {
+    await campaignService.getCampaignById(req.validated.params.id, req.user.workspaceId);
     await scheduler.resumeCampaign(req.validated.params.id);
     res.json({ ok: true });
   }),
@@ -102,6 +109,7 @@ export const resumeCampaign = [
 export const pauseCampaign = [
   validate(campaignIdSchema),
   asyncHandler(async (req, res) => {
+    await campaignService.getCampaignById(req.validated.params.id, req.user.workspaceId);
     await scheduler.pauseCampaign(req.validated.params.id, `Stopped by ${req.user.name}. Press Resume to continue.`);
     res.json({ ok: true });
   }),
@@ -175,6 +183,6 @@ export const updateSettings = [
   }),
 ];
 
-export const syncReplies = asyncHandler(async (_req, res) => {
-  res.json(await campaignService.syncRepliesFromGmail({ force: false }));
+export const syncReplies = asyncHandler(async (req, res) => {
+  res.json(await campaignService.syncRepliesFromGmail({ force: false, workspaceId: req.user.workspaceId }));
 });

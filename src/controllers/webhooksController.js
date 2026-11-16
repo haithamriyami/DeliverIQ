@@ -21,17 +21,29 @@ function eventName(event) {
   return String(event.event ?? '').toLowerCase();
 }
 
+/**
+ * Find the contact an event is about. The same email can exist in several workspaces, so
+ * an email alone is only trusted together with the campaign it was sent for.
+ */
 async function resolveRecipient(event) {
   if (event.recipientId) {
-    return prisma.recipient.findUnique({ where: { id: event.recipientId } });
+    return prisma.recipient.findUnique({ where: { id: String(event.recipientId) } });
   }
 
-  if (!event.email) {
+  const campaignId = event.campaignId ?? event.campaign_id;
+  if (!event.email || !campaignId) {
     return null;
   }
 
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: String(campaignId) },
+    select: { workspaceId: true },
+  });
+  if (!campaign) {
+    return null;
+  }
   return prisma.recipient.findUnique({
-    where: { email: String(event.email).toLowerCase() },
+    where: { workspaceId_email: { workspaceId: campaign.workspaceId, email: String(event.email).toLowerCase() } },
   });
 }
 
@@ -51,7 +63,7 @@ export const handleSendGrid = asyncHandler(async (req, res) => {
 
     if (name === 'bounce' || name === 'dropped' || name === 'spamreport') {
       if (recipient) {
-        await markRecipientInactive(recipient.email, 'bounced');
+        await markRecipientInactive(recipient.id, 'bounced');
       }
       await applyEngagementEvent({ campaignId, recipientId, event: 'bounce' });
       processed.push({ email: event.email, action: 'bounced' });
@@ -60,7 +72,7 @@ export const handleSendGrid = asyncHandler(async (req, res) => {
 
     if (name === 'unsubscribe' || name === 'group_unsubscribe') {
       if (recipient) {
-        await markRecipientInactive(recipient.email, 'unsubscribed');
+        await markRecipientInactive(recipient.id, 'unsubscribed');
       }
       processed.push({ email: event.email, action: 'unsubscribed' });
       continue;

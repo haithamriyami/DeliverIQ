@@ -21,13 +21,14 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   const user = await prisma.user.create({
     data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: 'enc' },
   });
-  const list = await prisma.contactList.create({ data: { name: 'L' } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi</p>' } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
   let n = 0;
   const makeCampaign = async (name) => {
     const ids = [];
-    for (let i = 0; i < 3; i += 1) ids.push((await prisma.recipient.create({ data: { email: `${name}${i}@x.dev`, name: 'P', listId: list.id } })).id);
-    const c = await cs.createCampaign({ name, subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: ids, listId: list.id, createdById: user.id });
+    for (let i = 0; i < 3; i += 1) ids.push((await prisma.recipient.create({ data: { workspaceId: ws.id, email: `${name}${i}@x.dev`, name: 'P', listId: list.id } })).id);
+    const c = await cs.createCampaign({ workspaceId: ws.id, name, subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: ids, listId: list.id, createdById: user.id });
     await prisma.campaignStep.updateMany({ where: { campaignId: c.id }, data: { status: 'sending' } });
     return { ...c, ids };
   };
@@ -72,7 +73,7 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   await prisma.user.update({ where: { id: user.id }, data: { nextSendAt: null } });
   const r = await scheduler.sendOneForSender(await me(), settings, { now: new Date(), send: deletingSend, hooks });
   assert.equal(r.sent, true);
-  const person = await prisma.recipient.findUnique({ where: { email: r.email } });
+  const person = await prisma.recipient.findFirst({ where: { email: r.email } });
   assert.equal(person.status, 'active');
 
   // 4. Global kill switch stops every account, and a skipped slot is given back.
@@ -80,20 +81,21 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   await scheduler.setGlobalPause(ws.id, true, 'test');
   const before = sends.length;
   assert.equal((await tick()).reason, 'paused');
-  const w2 = await scheduler.nextPendingForSender(await me());
+  // Work in a paused workspace is held back; look it up explicitly.
+  const w2 = await scheduler.nextPendingForSender(await me(), { pausedWorkspaces: true });
   assert.equal(
     await scheduler.blockReasonAtSendTime({ senderId: user.id, workspaceId: ws.id, stepId: w2.step.id, campaignId: live.id, recipientId: w2.recipient.id }),
     'global_paused'
   );
   const tickResult = await cs.runSchedulerTick({ budgetMs: 0 });
-  assert.equal(tickResult.results.length, 0);
+  assert.equal(tickResult.results.filter((row) => row.sent).length, 0);
   assert.equal(sends.length, before);
   await scheduler.setGlobalPause(ws.id, false);
   assert.equal((await tick()).sent, true);
 
   // 5. Contacts wrongly bounced by the old race are repaired automatically and idempotently.
-  const victim = await prisma.recipient.create({ data: { email: 'victim@x.dev', name: 'V', listId: list.id, status: 'bounced', lastError: 'Follow-up not found' } });
-  const real = await prisma.recipient.create({ data: { email: 'real@x.dev', name: 'R', listId: list.id, status: 'bounced', lastError: 'Gmail: address not found or mailbox unavailable.' } });
+  const victim = await prisma.recipient.create({ data: { workspaceId: ws.id, email: 'victim@x.dev', name: 'V', listId: list.id, status: 'bounced', lastError: 'Follow-up not found' } });
+  const real = await prisma.recipient.create({ data: { workspaceId: ws.id, email: 'real@x.dev', name: 'R', listId: list.id, status: 'bounced', lastError: 'Gmail: address not found or mailbox unavailable.' } });
   await cs.listCampaignsWithStats();
   await cs.listCampaignsWithStats();
   assert.equal((await prisma.recipient.findUnique({ where: { id: victim.id } })).status, 'active');

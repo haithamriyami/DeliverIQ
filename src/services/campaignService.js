@@ -15,6 +15,21 @@ import {
 import { classifyReply } from '../utils/replyClassifier.js';
 import { sendDecision } from '../utils/throttle.js';
 
+/**
+ * Optional workspace filter. API calls always pass the active workspace, so a campaign,
+ * template or contact of another workspace is simply not found. Internal scheduler code
+ * works across workspaces and passes nothing.
+ */
+function inWorkspace(workspaceId) {
+  return workspaceId ? { workspaceId } : {};
+}
+
+/** Workspaces a sender (connected Gmail user) is a member of. */
+export async function senderWorkspaceIds(senderId) {
+  const rows = await prisma.workspaceMember.findMany({ where: { userId: senderId }, select: { workspaceId: true } });
+  return rows.map((row) => row.workspaceId);
+}
+
 function isSendable(recipient, step) {
   if (!recipient || recipient.status !== 'active' || recipient.doNotContact) return false;
   if (step && step.stepNumber > 1 && recipient.repliedAt) return false;
@@ -105,9 +120,13 @@ export async function createCampaign({
   notes,
   listId,
   createdById,
+  workspaceId,
 }) {
-  const template = await prisma.template.findUnique({
-    where: { id: templateId },
+  if (!workspaceId) {
+    throw new HttpError(500, 'Workspace is missing for this request');
+  }
+  const template = await prisma.template.findFirst({
+    where: { id: templateId, workspaceId },
   });
 
   if (!template) {
@@ -116,7 +135,7 @@ export async function createCampaign({
 
   const uniqueIds = [...new Set(recipientIds)];
   const recipients = await prisma.recipient.findMany({
-    where: { id: { in: uniqueIds } },
+    where: { id: { in: uniqueIds }, workspaceId },
     select: { id: true, listId: true, email: true, list: { select: { name: true } } },
   });
 
@@ -125,6 +144,10 @@ export async function createCampaign({
   }
 
   if (listId) {
+    const list = await prisma.contactList.findFirst({ where: { id: listId, workspaceId }, select: { id: true } });
+    if (!list) {
+      throw new HttpError(404, 'List not found');
+    }
     const mixed = recipients.filter((row) => row.listId !== listId);
     if (mixed.length) {
       throw new HttpError(
@@ -140,7 +163,7 @@ export async function createCampaign({
     listId = listIds[0] || null;
   }
 
-  const assignments = await campaignAssignmentsForRecipients(uniqueIds);
+  const assignments = await campaignAssignmentsForRecipients(uniqueIds, workspaceId);
   const takenIds = uniqueIds.filter((id) => (assignments.get(id) || []).length > 0);
   if (takenIds.length) {
     const people = await prisma.recipient.findMany({
@@ -163,6 +186,7 @@ export async function createCampaign({
 
   return prisma.campaign.create({
     data: {
+      workspaceId,
       name,
       subject,
       templateId,
@@ -187,8 +211,9 @@ export async function createCampaign({
   });
 }
 
-export async function listCampaigns() {
+export async function listCampaigns(workspaceId) {
   return prisma.campaign.findMany({
+    where: inWorkspace(workspaceId),
     orderBy: { createdAt: 'desc' },
     include: {
       template: { select: { id: true, name: true } },
@@ -202,9 +227,9 @@ export async function listCampaigns() {
   });
 }
 
-export async function getCampaignById(id) {
-  const campaign = await prisma.campaign.findUnique({
-    where: { id },
+export async function getCampaignById(id, workspaceId) {
+  const campaign = await prisma.campaign.findFirst({
+    where: { id, ...inWorkspace(workspaceId) },
     include: campaignInclude,
   });
 
@@ -228,8 +253,8 @@ function withTimeout(promise, ms) {
  * sender tick that already picked one of its emails is refused by the final check right
  * before Gmail is called, then remove legacy queue jobs, then delete the rows.
  */
-export async function deleteCampaign(id) {
-  await getCampaignById(id);
+export async function deleteCampaign(id, workspaceId) {
+  await getCampaignById(id, workspaceId);
 
   await prisma.$transaction([
     prisma.campaign.update({
@@ -271,14 +296,13 @@ export async function deleteCampaign(id) {
   return { ok: true };
 }
 
-export async function enqueueCampaign(campaignId, stepId) {
-  const campaign = await getCampaignById(campaignId);
+export async function enqueueCampaign(campaignId, stepId, workspaceId) {
+  const campaign = await getCampaignById(campaignId, workspaceId);
   const step = await resolveSendStep(campaign, stepId);
   const audienceIds = audienceIdsFor(campaign, step);
-  const template = step.template || campaign.template;
 
   const recipients = await prisma.recipient.findMany({
-    where: { id: { in: audienceIds } },
+    where: { id: { in: audienceIds }, workspaceId: campaign.workspaceId },
   });
 
   const alreadyProcessed = await prisma.campaignRecipient.findMany({
@@ -365,15 +389,15 @@ export async function enqueueCampaign(campaignId, stepId) {
   };
 }
 
-export async function createFollowUp({ campaignId, subject, templateId, audience = 'active' }) {
-  const campaign = await getCampaignById(campaignId);
-  const template = await prisma.template.findUnique({ where: { id: templateId } });
+export async function createFollowUp({ campaignId, subject, templateId, audience = 'active', workspaceId }) {
+  const campaign = await getCampaignById(campaignId, workspaceId);
+  const template = await prisma.template.findFirst({ where: { id: templateId, workspaceId: campaign.workspaceId } });
   if (!template) {
     throw new HttpError(404, 'Template not found');
   }
 
   try {
-    await syncBouncesFromGmail();
+    await syncBouncesFromGmail({ workspaceId: campaign.workspaceId });
   } catch {
     // Gmail read may need reconnect; still allow creating the follow-up.
   }
@@ -383,7 +407,7 @@ export async function createFollowUp({ campaignId, subject, templateId, audience
     throw new HttpError(400, 'This campaign has no first email yet.');
   }
   const livePeople = await prisma.recipient.findMany({
-    where: { id: { in: campaign.recipientIds } },
+    where: { id: { in: campaign.recipientIds }, workspaceId: campaign.workspaceId },
   });
   // People who replied (or opted out) never get another follow-up.
   const activePeople = livePeople.filter(
@@ -488,8 +512,8 @@ export async function maybeCompleteCampaign(campaignId, stepId) {
   });
 }
 
-export async function getCampaignReport(campaignId) {
-  const campaign = await getCampaignById(campaignId);
+export async function getCampaignReport(campaignId, workspaceId) {
+  const campaign = await getCampaignById(campaignId, workspaceId);
 
   const grouped = await prisma.campaignRecipient.groupBy({
     by: ['status'],
@@ -648,8 +672,8 @@ export async function recordBounce({ campaignId, recipientId, error, stepId, sen
   return last;
 }
 
-export async function listCampaignAudience(campaignId, kind = 'sent', stepId) {
-  const campaign = await getCampaignById(campaignId);
+export async function listCampaignAudience(campaignId, kind = 'sent', stepId, workspaceId) {
+  const campaign = await getCampaignById(campaignId, workspaceId);
   const step = await resolveSendStep(campaign, stepId);
   const audienceIds = audienceIdsFor(campaign, step);
 
@@ -662,6 +686,7 @@ export async function listCampaignAudience(campaignId, kind = 'sent', stepId) {
     const people = await prisma.recipient.findMany({
       where: {
         id: { in: audienceIds },
+        workspaceId: campaign.workspaceId,
         status: 'active',
       },
       orderBy: { email: 'asc' },
@@ -697,29 +722,37 @@ export async function listCampaignAudience(campaignId, kind = 'sent', stepId) {
   });
 }
 
-export async function listCampaignBounces(campaignId) {
-  return listCampaignAudience(campaignId, 'bounced');
+export async function listCampaignBounces(campaignId, workspaceId) {
+  return listCampaignAudience(campaignId, 'bounced', undefined, workspaceId);
 }
 
 /**
  * Manual or page triggered bounce check. Goes through the throttled, incremental inbox
  * sync (one sync covers bounces and replies) instead of rescanning Gmail every time.
  */
-export async function syncBouncesFromGmail({ force = false } = {}) {
+export async function syncBouncesFromGmail({ force = false, workspaceId } = {}) {
   const { syncAllInboxes } = await import('./inboxSync.js');
-  const result = await syncAllInboxes({ force });
+  const result = await syncAllInboxes({ force, workspaceId });
   return { scanned: result.scanned, marked: result.bouncesMarked, emails: result.bouncedEmails, skipped: result.skipped, notice: result.notice };
 }
 
-/** Mark contacts from Gmail bounce notices as bounced. Idempotent. */
-export async function applyBounceNotices(notices) {
+/**
+ * Mark contacts from Gmail bounce notices as bounced. Idempotent.
+ * With a sender, only contacts in workspaces that Gmail account sends for are touched, so a
+ * bounce in one workspace never changes a contact with the same email in another.
+ */
+export async function applyBounceNotices(notices, sender) {
   if (notices.length === 0) {
     return { scanned: 0, marked: 0, emails: [] };
   }
 
   const byEmail = new Map(notices.map((row) => [row.email, row.reason]));
+  const workspaceIds = sender?.id ? await senderWorkspaceIds(sender.id) : null;
   const recipients = await prisma.recipient.findMany({
-    where: { email: { in: [...byEmail.keys()] } },
+    where: {
+      email: { in: [...byEmail.keys()] },
+      ...(workspaceIds ? { workspaceId: { in: workspaceIds } } : {}),
+    },
   });
 
   const emails = [];
@@ -740,7 +773,11 @@ export async function applyBounceNotices(notices) {
 
     // Only mark the latest uncertain send as bounced — not every past follow-up row.
     const latestSent = await prisma.campaignRecipient.findFirst({
-      where: { recipientId: recipient.id, status: 'sent' },
+      where: {
+        recipientId: recipient.id,
+        status: 'sent',
+        ...(sender?.id ? { OR: [{ senderId: sender.id }, { senderId: null }] } : {}),
+      },
       orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
     });
 
@@ -848,11 +885,11 @@ function funnelFromCounts(counts, { audienceSize = 0, pending = 0 } = {}) {
  */
 export const FALSE_BOUNCE_ERRORS = ['Follow-up not found', 'Campaign not found'];
 
-export async function reconcileCampaignSteps({ apply = true } = {}) {
+export async function reconcileCampaignSteps({ apply = true, workspaceId } = {}) {
   // Contacts wrongly marked bounced when a send succeeded but its campaign had just been
   // deleted (the old code treated the "not found" while recording as a bounce).
   const falseBounces = await prisma.recipient.findMany({
-    where: { status: 'bounced', lastError: { in: FALSE_BOUNCE_ERRORS } },
+    where: { status: 'bounced', lastError: { in: FALSE_BOUNCE_ERRORS }, ...inWorkspace(workspaceId) },
     select: { id: true },
   });
   if (apply && falseBounces.length) {
@@ -863,7 +900,7 @@ export async function reconcileCampaignSteps({ apply = true } = {}) {
   }
 
   const stale = await prisma.campaignStep.findMany({
-    where: { status: 'sending' },
+    where: { status: 'sending', ...(workspaceId ? { campaign: { workspaceId } } : {}) },
     select: {
       id: true,
       stepNumber: true,
@@ -881,9 +918,9 @@ export async function reconcileCampaignSteps({ apply = true } = {}) {
   return superseded.map((step) => ({ stepId: step.id, campaignId: step.campaignId, campaign: step.campaign.name, stepNumber: step.stepNumber }));
 }
 
-export async function listCampaignsWithStats() {
-  await reconcileCampaignSteps();
-  const campaigns = await listCampaigns();
+export async function listCampaignsWithStats(workspaceId) {
+  await reconcileCampaignSteps({ workspaceId });
+  const campaigns = await listCampaigns(workspaceId);
   if (campaigns.length === 0) {
     return [];
   }
@@ -896,6 +933,7 @@ export async function listCampaignsWithStats() {
   const [grouped, rows, people, replyGroups] = await Promise.all([
     prisma.campaignRecipient.groupBy({
       by: ['stepId', 'status'],
+      where: { campaignId: { in: campaignIds } },
       _count: { _all: true },
     }),
     prisma.campaignRecipient.findMany({
@@ -903,7 +941,7 @@ export async function listCampaignsWithStats() {
       select: { campaignId: true, stepId: true, recipientId: true },
     }),
     prisma.recipient.findMany({
-      where: { id: { in: allAudienceIds } },
+      where: { id: { in: allAudienceIds }, ...inWorkspace(workspaceId) },
       select: { id: true, status: true, doNotContact: true, repliedAt: true },
     }),
     prisma.inboundReply.groupBy({
@@ -1057,15 +1095,20 @@ async function livePendingCount(campaign, step) {
   return existing.filter((row) => isSendable(row, step) && !processedIds.has(row.id)).length;
 }
 
-export async function getDashboard() {
+export async function getDashboard(workspaceId) {
+  if (!workspaceId) {
+    throw new HttpError(500, 'Workspace is missing for this request');
+  }
   const [campaigns, recipients, grouped, attemptedPeople] = await Promise.all([
-    listCampaignsWithStats(),
-    prisma.recipient.findMany({ select: { id: true, status: true } }),
+    listCampaignsWithStats(workspaceId),
+    prisma.recipient.findMany({ where: { workspaceId }, select: { id: true, status: true } }),
     prisma.campaignRecipient.groupBy({
       by: ['status'],
+      where: { campaign: { workspaceId } },
       _count: { _all: true },
     }),
     prisma.campaignRecipient.findMany({
+      where: { campaign: { workspaceId } },
       select: { recipientId: true },
       distinct: ['recipientId'],
     }),
@@ -1116,8 +1159,8 @@ export async function getDashboard() {
   };
 }
 
-export async function sendTestEmail({ campaignId, to }) {
-  const campaign = await getCampaignById(campaignId);
+export async function sendTestEmail({ campaignId, to, workspaceId }) {
+  const campaign = await getCampaignById(campaignId, workspaceId);
   if (!to) {
     throw new HttpError(400, 'Test email address is required');
   }
@@ -1126,9 +1169,9 @@ export async function sendTestEmail({ campaignId, to }) {
   const template = step.template || campaign.template;
 
   // Test sends use the same Gmail account, so they respect the same gap and daily cap.
-  const sender = await resolveSenderUser(campaign.createdById);
+  const sender = await resolveSenderUser(campaign.createdById, campaign.workspaceId);
   if (sender) {
-    const settings = await workspaceSendSettings();
+    const settings = await workspaceSendSettings(campaign.workspaceId);
     const decision = sendDecision({
       now: new Date(),
       nextSendAt: sender.nextSendAt,
@@ -1155,8 +1198,9 @@ export async function sendTestEmail({ campaignId, to }) {
     recipientId: 'test',
     stepId: step.id,
     unsubscribeUrl: `${env.appUrl}/unsubscribe.html`,
-    userId: sender?.id || campaign.createdById,
+    userId: sender?.id,
     campaignName: campaign.name,
+    workspaceId: campaign.workspaceId,
   });
 }
 
@@ -1166,15 +1210,21 @@ export async function sendTestEmail({ campaignId, to }) {
  * Human replies stop follow-ups; opt outs also mark the contact do not contact;
  * auto replies are only counted.
  */
-export async function syncRepliesFromGmail({ force = false } = {}) {
+export async function syncRepliesFromGmail({ force = false, workspaceId } = {}) {
   const { syncAllInboxes } = await import('./inboxSync.js');
-  const result = await syncAllInboxes({ force });
+  const result = await syncAllInboxes({ force, workspaceId });
   return { ...result.replies, skipped: result.skipped, notice: result.notice };
 }
 
 /** Store and act on inbound replies for one sender. Idempotent (dedupe by Gmail message id). */
 export async function applyInboundReplies(sender, messages, { classify = classifyReply } = {}) {
   const summary = { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0 };
+  // Only sends from this Gmail account (or old rows from before senders were recorded, in
+  // workspaces it sends for) can be what a reply in its inbox answers.
+  const workspaceIds = await senderWorkspaceIds(sender.id);
+  const fromThisSender = {
+    OR: [{ senderId: sender.id }, { senderId: null, campaign: { workspaceId: { in: workspaceIds } } }],
+  };
   {
     for (const message of messages) {
       summary.scanned += 1;
@@ -1183,14 +1233,14 @@ export async function applyInboundReplies(sender, messages, { classify = classif
 
       let send = message.threadId
         ? await prisma.campaignRecipient.findFirst({
-            where: { threadId: message.threadId },
+            where: { threadId: message.threadId, ...fromThisSender },
             orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
             include: { recipient: true },
           })
         : null;
       if (!send && message.fromEmail) {
         send = await prisma.campaignRecipient.findFirst({
-          where: { recipient: { email: message.fromEmail } },
+          where: { recipient: { email: message.fromEmail }, ...fromThisSender },
           orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
           include: { recipient: true },
         });

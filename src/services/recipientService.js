@@ -4,7 +4,19 @@ import { HttpError } from '../middleware/errorHandler.js';
 import { isValidEmailSyntax, checkEmailDomain, normalizeEmail } from '../utils/emailValidation.js';
 import { resolveImportListTarget } from '../utils/listSort.js';
 
-export async function createRecipient({ email, name, timezone, notes, listId }) {
+/**
+ * Every function here works inside one workspace. Contacts, lists and campaigns of other
+ * workspaces are never read or changed. A missing workspace is a programming error.
+ */
+function requireWorkspace(workspaceId) {
+  if (!workspaceId) {
+    throw new HttpError(500, 'Workspace is missing for this request');
+  }
+  return workspaceId;
+}
+
+export async function createRecipient({ workspaceId, email, name, timezone, notes, listId }) {
+  requireWorkspace(workspaceId);
   const normalized = normalizeEmail(email);
   
   if (!isValidEmailSyntax(normalized)) {
@@ -16,9 +28,9 @@ export async function createRecipient({ email, name, timezone, notes, listId }) 
     throw new HttpError(400, `Email address is not deliverable: ${dnsCheck.reason}`);
   }
   
-  const list = await getContactListById(listId);
+  const list = await getContactListById(listId, workspaceId);
   const existing = await prisma.recipient.findUnique({
-    where: { email: normalized },
+    where: { workspaceId_email: { workspaceId, email: normalized } },
     include: { list: { select: { id: true, name: true } } },
   });
 
@@ -33,6 +45,7 @@ export async function createRecipient({ email, name, timezone, notes, listId }) 
 
   return prisma.recipient.create({
     data: {
+      workspaceId,
       email: normalized,
       name,
       timezone: timezone || 'UTC',
@@ -43,8 +56,8 @@ export async function createRecipient({ email, name, timezone, notes, listId }) 
   });
 }
 
-export async function listRecipients(status, q, listId) {
-  const where = {};
+export async function listRecipients(workspaceId, status, q, listId) {
+  const where = { workspaceId: requireWorkspace(workspaceId) };
   if (status) {
     where.status = status;
   }
@@ -60,11 +73,11 @@ export async function listRecipients(status, q, listId) {
     ];
   }
   return prisma.recipient.findMany({
-    where: Object.keys(where).length ? where : undefined,
+    where,
     orderBy: { createdAt: 'desc' },
     include: { list: { select: { id: true, name: true } } },
   }).then(async (recipients) => {
-    const assignments = await campaignAssignmentsForRecipients(recipients.map((row) => row.id));
+    const assignments = await campaignAssignmentsForRecipients(recipients.map((row) => row.id), workspaceId);
     return recipients.map((row) => ({
       ...row,
       inCampaigns: assignments.get(row.id) || [],
@@ -72,7 +85,7 @@ export async function listRecipients(status, q, listId) {
   });
 }
 
-export async function campaignAssignmentsForRecipients(recipientIds) {
+export async function campaignAssignmentsForRecipients(recipientIds, workspaceId) {
   const map = new Map();
   if (!recipientIds.length) {
     return map;
@@ -81,11 +94,12 @@ export async function campaignAssignmentsForRecipients(recipientIds) {
   const idSet = new Set(recipientIds);
   const [campaigns, rows] = await Promise.all([
     prisma.campaign.findMany({
+      where: workspaceId ? { workspaceId } : undefined,
       select: { id: true, name: true, status: true, recipientIds: true },
       orderBy: { createdAt: 'asc' },
     }),
     prisma.campaignRecipient.findMany({
-      where: { recipientId: { in: recipientIds } },
+      where: { recipientId: { in: recipientIds }, ...(workspaceId ? { campaign: { workspaceId } } : {}) },
       select: {
         recipientId: true,
         campaign: { select: { id: true, name: true, status: true } },
@@ -121,33 +135,37 @@ export async function campaignAssignmentsForRecipients(recipientIds) {
   return map;
 }
 
-export async function getContactListById(id) {
+export async function getContactListById(id, workspaceId) {
+  requireWorkspace(workspaceId);
   if (!id) {
     throw new HttpError(400, 'Pick a list first, such as Agencies or Restaurants');
   }
-  const list = await prisma.contactList.findUnique({ where: { id } });
+  const list = await prisma.contactList.findFirst({ where: { id: String(id), workspaceId } });
   if (!list) {
     throw new HttpError(404, 'List not found');
   }
   return list;
 }
 
-export async function ensureDefaultLists() {
-  const existing = await prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
+export async function ensureDefaultLists(workspaceId) {
+  requireWorkspace(workspaceId);
+  const existing = await prisma.contactList.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' } });
   if (existing.length) {
     return existing;
   }
 
   await prisma.contactList.createMany({
-    data: [{ name: 'Agencies' }, { name: 'Restaurants' }],
+    data: [{ name: 'Agencies', workspaceId }, { name: 'Restaurants', workspaceId }],
+    skipDuplicates: true,
   });
-  return prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
+  return prisma.contactList.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' } });
 }
 
-export async function listContactLists() {
-  const lists = await ensureDefaultLists();
+export async function listContactLists(workspaceId) {
+  const lists = await ensureDefaultLists(workspaceId);
   const grouped = await prisma.recipient.groupBy({
     by: ['listId'],
+    where: { workspaceId },
     _count: { _all: true },
   });
   const counts = new Map(grouped.map((row) => [row.listId, row._count._all]));
@@ -157,44 +175,46 @@ export async function listContactLists() {
   }));
 }
 
-export async function createContactList(name) {
+export async function createContactList(workspaceId, name) {
+  requireWorkspace(workspaceId);
   const trimmed = String(name || '').trim();
   if (!trimmed) {
     throw new HttpError(400, 'List name is required');
   }
 
   const clash = await prisma.contactList.findFirst({
-    where: { name: { equals: trimmed, mode: 'insensitive' } },
+    where: { workspaceId, name: { equals: trimmed, mode: 'insensitive' } },
   });
   if (clash) {
     throw new HttpError(409, `A list named ${clash.name} already exists`);
   }
 
-  return prisma.contactList.create({ data: { name: trimmed } });
+  return prisma.contactList.create({ data: { name: trimmed, workspaceId } });
 }
 /** Find a list by name (case insensitive) or create it. */
-export async function ensureListByName(name) {
+export async function ensureListByName(workspaceId, name) {
+  requireWorkspace(workspaceId);
   const trimmed = String(name || '').trim();
   if (!trimmed) {
     throw new HttpError(400, 'List name is required');
   }
   const existing = await prisma.contactList.findFirst({
-    where: { name: { equals: trimmed, mode: 'insensitive' } },
+    where: { workspaceId, name: { equals: trimmed, mode: 'insensitive' } },
   });
   if (existing) return existing;
   try {
-    return await prisma.contactList.create({ data: { name: trimmed } });
+    return await prisma.contactList.create({ data: { name: trimmed, workspaceId } });
   } catch {
     return prisma.contactList.findFirst({
-      where: { name: { equals: trimmed, mode: 'insensitive' } },
+      where: { workspaceId, name: { equals: trimmed, mode: 'insensitive' } },
     });
   }
 }
 
 
-export async function moveRecipient(id, listId) {
-  await getRecipientById(id);
-  const list = await getContactListById(listId);
+export async function moveRecipient(workspaceId, id, listId) {
+  await getRecipientById(id, workspaceId);
+  const list = await getContactListById(listId, workspaceId);
   return prisma.recipient.update({
     where: { id },
     data: { listId: list.id },
@@ -202,9 +222,10 @@ export async function moveRecipient(id, listId) {
   });
 }
 
-export async function deleteBouncedRecipients(listId) {
+export async function deleteBouncedRecipients(workspaceId, listId) {
   const result = await prisma.recipient.deleteMany({
     where: {
+      workspaceId: requireWorkspace(workspaceId),
       status: 'bounced',
       ...(listId ? { listId } : {}),
     },
@@ -212,24 +233,24 @@ export async function deleteBouncedRecipients(listId) {
   return { deleted: result.count };
 }
 
-export async function deleteRecipient(id) {
-  const recipient = await getRecipientById(id);
+export async function deleteRecipient(workspaceId, id) {
+  const recipient = await getRecipientById(id, workspaceId);
   await prisma.recipient.delete({ where: { id: recipient.id } });
   return { ok: true };
 }
 
-export async function getRecipientById(id) {
-  const recipient = await prisma.recipient.findUnique({ where: { id } });
+export async function getRecipientById(id, workspaceId) {
+  requireWorkspace(workspaceId);
+  const recipient = await prisma.recipient.findFirst({ where: { id: String(id), workspaceId } });
   if (!recipient) {
     throw new HttpError(404, 'Recipient not found');
   }
   return recipient;
 }
 
-export async function markRecipientInactive(email, status) {
-  const recipient = await prisma.recipient.findUnique({
-    where: { email: email.toLowerCase() },
-  });
+/** Mark one contact bounced or unsubscribed. Only that workspace's contact changes. */
+export async function markRecipientInactive(recipientId, status) {
+  const recipient = await prisma.recipient.findUnique({ where: { id: recipientId } });
 
   if (!recipient) {
     return null;
@@ -289,9 +310,9 @@ function headerMap(headers) {
 export async function importRecipientsFromCsv(
   csvText,
   listId,
-  { autoSort = true, checkDomain = checkEmailDomain } = {}
+  { workspaceId, autoSort = true, checkDomain = checkEmailDomain } = {}
 ) {
-  const fallbackList = await getContactListById(listId);
+  const fallbackList = await getContactListById(listId, workspaceId);
   let records;
   try {
     records = parse(csvText, {
@@ -341,7 +362,7 @@ export async function importRecipientsFromCsv(
     const target = resolveImportListTarget({ timezone, notes });
     if (!target?.listName) return fallbackList;
     if (listCache.has(target.listName)) return listCache.get(target.listName);
-    const list = await ensureListByName(target.listName);
+    const list = await ensureListByName(workspaceId, target.listName);
     listCache.set(target.listName, list);
     return list;
   };
@@ -373,13 +394,14 @@ export async function importRecipientsFromCsv(
     const list = await resolveList(timezone, notes);
 
     const existing = await prisma.recipient.findUnique({
-      where: { email },
+      where: { workspaceId_email: { workspaceId, email } },
       include: { list: { select: { name: true } } },
     });
 
     if (!existing) {
       await prisma.recipient.create({
         data: {
+          workspaceId,
           email,
           name: name || email.split('@')[0],
           timezone: timezone || 'UTC',
@@ -426,29 +448,30 @@ export async function importRecipientsFromCsv(
 export const UNASSIGNED_LIST_NAME = 'Unassigned';
 
 /** The list that keeps contacts whose list was deleted. Created when first needed. */
-export async function ensureUnassignedList(tx = prisma) {
+export async function ensureUnassignedList(workspaceId, tx = prisma) {
+  requireWorkspace(workspaceId);
   const existing = await tx.contactList.findFirst({
-    where: { name: { equals: UNASSIGNED_LIST_NAME, mode: 'insensitive' } },
+    where: { workspaceId, name: { equals: UNASSIGNED_LIST_NAME, mode: 'insensitive' } },
   });
   if (existing) return existing;
   try {
-    return await tx.contactList.create({ data: { name: UNASSIGNED_LIST_NAME } });
+    return await tx.contactList.create({ data: { name: UNASSIGNED_LIST_NAME, workspaceId } });
   } catch {
-    return tx.contactList.findFirst({ where: { name: UNASSIGNED_LIST_NAME } });
+    return tx.contactList.findFirst({ where: { workspaceId, name: UNASSIGNED_LIST_NAME } });
   }
 }
 
 /** Contacts that must never be deleted: on an unfinished campaign, or suppressed. */
-async function protectedContactIds(recipients) {
+async function protectedContactIds(recipients, workspaceId) {
   const ids = recipients.map((row) => row.id);
-  const assignments = await campaignAssignmentsForRecipients(ids);
+  const assignments = await campaignAssignmentsForRecipients(ids, workspaceId);
   const inCampaigns = new Set();
   for (const [id, campaigns] of assignments) {
     if (campaigns.some((campaign) => campaign.status !== 'completed')) inCampaigns.add(id);
   }
   // Paused campaigns are not finished either.
   const pausedRows = await prisma.campaign.findMany({
-    where: { pausedAt: { not: null } },
+    where: { workspaceId, pausedAt: { not: null } },
     select: { recipientIds: true },
   });
   for (const campaign of pausedRows) {
@@ -463,13 +486,13 @@ async function protectedContactIds(recipients) {
 }
 
 /** What deleting this list would do. Used by the confirm dialog. */
-export async function previewListDeletion(id) {
-  const list = await getContactListById(id);
+export async function previewListDeletion(workspaceId, id) {
+  const list = await getContactListById(id, workspaceId);
   const recipients = await prisma.recipient.findMany({
     where: { listId: list.id },
     select: { id: true, status: true, doNotContact: true },
   });
-  const { inCampaigns, suppressed } = await protectedContactIds(recipients);
+  const { inCampaigns, suppressed } = await protectedContactIds(recipients, workspaceId);
   const kept = new Set([...inCampaigns, ...suppressed]);
   return {
     id: list.id,
@@ -490,8 +513,8 @@ export async function previewListDeletion(id) {
  *   and suppression records (bounced, unsubscribed, do not contact). Those move to
  *   Unassigned so they are still never emailed.
  */
-export async function deleteContactList(id, { mode = 'list' } = {}) {
-  const list = await getContactListById(id);
+export async function deleteContactList(workspaceId, id, { mode = 'list' } = {}) {
+  const list = await getContactListById(id, workspaceId);
   const recipients = await prisma.recipient.findMany({
     where: { listId: list.id },
     select: { id: true, status: true, doNotContact: true },
@@ -507,7 +530,7 @@ export async function deleteContactList(id, { mode = 'list' } = {}) {
     throw new HttpError(400, 'Choose whether to keep or delete the contacts');
   }
 
-  const { inCampaigns, suppressed } = await protectedContactIds(recipients);
+  const { inCampaigns, suppressed } = await protectedContactIds(recipients, workspaceId);
   const keep = mode === 'list' ? recipients.map((row) => row.id) : recipients.filter((row) => inCampaigns.has(row.id) || suppressed.has(row.id)).map((row) => row.id);
   const remove = mode === 'list' ? [] : recipients.filter((row) => !inCampaigns.has(row.id) && !suppressed.has(row.id)).map((row) => row.id);
 
@@ -521,7 +544,7 @@ export async function deleteContactList(id, { mode = 'list' } = {}) {
   return prisma.$transaction(async (tx) => {
     let moved = 0;
     if (keep.length) {
-      const target = await ensureUnassignedList(tx);
+      const target = await ensureUnassignedList(workspaceId, tx);
       moved = (await tx.recipient.updateMany({ where: { id: { in: keep } }, data: { listId: target.id } })).count;
     }
     const deletedCount = remove.length ? (await tx.recipient.deleteMany({ where: { id: { in: remove } } })).count : 0;
@@ -538,15 +561,16 @@ export async function deleteContactList(id, { mode = 'list' } = {}) {
 }
 
 /** Delete every list that has no contacts. Keeps at least one list. */
-export async function deleteEmptyLists() {
-  const lists = await prisma.contactList.findMany({ orderBy: { createdAt: 'asc' } });
-  const grouped = await prisma.recipient.groupBy({ by: ['listId'], _count: { _all: true } });
+export async function deleteEmptyLists(workspaceId) {
+  requireWorkspace(workspaceId);
+  const lists = await prisma.contactList.findMany({ where: { workspaceId }, orderBy: { createdAt: 'asc' } });
+  const grouped = await prisma.recipient.groupBy({ by: ['listId'], where: { workspaceId }, _count: { _all: true } });
   const counts = new Map(grouped.map((row) => [row.listId, row._count._all]));
   let empty = lists.filter((list) => !counts.get(list.id));
   if (empty.length === lists.length) empty = empty.slice(1); // never remove the last list
   if (!empty.length) return { deleted: 0, names: [] };
   const result = await prisma.contactList.deleteMany({
-    where: { id: { in: empty.map((list) => list.id) }, recipients: { none: {} } },
+    where: { workspaceId, id: { in: empty.map((list) => list.id) }, recipients: { none: {} } },
   });
   return { deleted: result.count, names: empty.map((list) => list.name) };
 }

@@ -70,6 +70,16 @@ export async function connectGmail({ userId, code }) {
   const oauth2 = google.oauth2({ version: 'v2', auth: client });
   const { data } = await oauth2.userinfo.get();
 
+  // The send gap and daily cap are tracked per DeliverIQ user. If two users connected the
+  // same Gmail, each would get its own gap and cap and together they could overrun Gmail.
+  const clash = await prisma.user.findFirst({
+    where: { id: { not: userId }, gmailEmail: { equals: data.email, mode: 'insensitive' } },
+    select: { id: true },
+  });
+  if (clash) {
+    throw new HttpError(409, 'That Gmail account is already connected to another DeliverIQ login. Use it from that login instead.');
+  }
+
   return prisma.user.update({
     where: { id: userId },
     data: {
@@ -108,16 +118,25 @@ export async function gmailStatus(userId) {
   };
 }
 
-export async function getUserSender(userId) {
-  const user = userId
-    ? await prisma.user.findUnique({ 
-        where: { id: userId },
-        include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
-      })
-    : await prisma.user.findFirst({
-        where: { gmailRefreshToken: { not: null } },
-        include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
-      });
+/**
+ * The Gmail sender for one user. workspaceId picks whose display name and reply to
+ * address are used (the workspace being sent for); it defaults to the user's default one.
+ * Without a user there is no sender: never borrow another account's Gmail.
+ */
+export async function getUserSender(userId, workspaceId) {
+  if (!userId) {
+    return null;
+  }
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
+  });
+  if (user && workspaceId && workspaceId !== user.workspaceId) {
+    user.workspace = await prisma.workspace.findUnique({
+      where: { id: workspaceId },
+      select: { fromDisplayName: true, replyToEmail: true },
+    });
+  }
 
   if (!user?.gmailRefreshToken) {
     return null;
@@ -156,7 +175,14 @@ function formatFrom(displayName, email) {
 }
 
 export async function getWorkspaceSender(workspaceId) {
-  return getUserSender(null);
+  if (!workspaceId) {
+    return null;
+  }
+  const member = await prisma.workspaceMember.findFirst({
+    where: { workspaceId, user: { gmailRefreshToken: { not: null } } },
+    orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
+  });
+  return member ? getUserSender(member.userId, workspaceId) : null;
 }
 
 /**
@@ -204,8 +230,9 @@ export async function sendViaGmail({
   references,
   threadId,
   userId,
+  workspaceId,
 }) {
-  const sender = await getUserSender(userId);
+  const sender = await getUserSender(userId, workspaceId);
   if (!sender) {
     return null;
   }

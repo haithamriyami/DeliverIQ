@@ -27,8 +27,9 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
     await prisma[table].deleteMany({});
   }
 
-  const agencies = await prisma.contactList.create({ data: { name: 'Agencies' } });
-  await prisma.contactList.create({ data: { name: 'Restaurants' } });
+  const ws = await prisma.workspace.create({ data: { name: 'W' } });
+  const agencies = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'Agencies' } });
+  await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'Restaurants' } });
 
   const csv = [
     'email,name,timezone,notes',
@@ -43,6 +44,7 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
 
   const alwaysOk = async () => ({ valid: true });
   const summary = await rs.importRecipientsFromCsv(csv, agencies.id, {
+    workspaceId: ws.id,
     autoSort: true,
     checkDomain: alwaysOk,
   });
@@ -61,13 +63,13 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
   assert.ok(names.includes('Salons & Barbers (Canada)'));
   assert.ok(names.includes('Agencies (United Kingdom)'));
 
-  const a1 = await prisma.recipient.findUnique({
+  const a1 = await prisma.recipient.findFirst({
     where: { email: 'a1@example.com' },
     include: { list: true },
   });
   assert.equal(a1.list.name, 'Agencies (South Africa)');
 
-  const x1 = await prisma.recipient.findUnique({
+  const x1 = await prisma.recipient.findFirst({
     where: { email: 'x1@example.com' },
     include: { list: true },
   });
@@ -79,6 +81,7 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
     'def1@example.com,Default,Canada,named | agency | Canada | https://def.test',
   ].join('\n');
   const defSummary = await rs.importRecipientsFromCsv(defaultCsv, agencies.id, {
+    workspaceId: ws.id,
     checkDomain: alwaysOk,
   });
   assert.equal(defSummary.autoSort, true);
@@ -90,12 +93,13 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
     'plain1@example.com,Pat,Canada,named | beauty | Canada | https://p.test',
   ].join('\n');
   const plain = await rs.importRecipientsFromCsv(plainCsv, agencies.id, {
+    workspaceId: ws.id,
     autoSort: false,
     checkDomain: alwaysOk,
   });
   assert.equal(plain.created, 1);
   assert.deepEqual(plain.byList, { Agencies: 1 });
-  const plainRow = await prisma.recipient.findUnique({
+  const plainRow = await prisma.recipient.findFirst({
     where: { email: 'plain1@example.com' },
     include: { list: true },
   });
@@ -105,10 +109,10 @@ test('CSV auto-sort creates country sector lists and reports a per-list summary'
   const again = await rs.importRecipientsFromCsv(
     'email,name,timezone,notes\na1@example.com,Ann Updated,South Africa,named | agency | South Africa | https://a.test',
     agencies.id,
-    { autoSort: true, checkDomain: alwaysOk }
+    { workspaceId: ws.id, autoSort: true, checkDomain: alwaysOk }
   );
   assert.equal(again.updated, 1);
-  assert.equal((await prisma.recipient.findUnique({ where: { email: 'a1@example.com' } })).name, 'Ann Updated');
+  assert.equal((await prisma.recipient.findFirst({ where: { email: 'a1@example.com' } })).name, 'Ann Updated');
 
   await prisma.$disconnect();
 });
