@@ -74,7 +74,10 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   const sentList = await cs.listCampaignAudience(fresh.id, 'sent');
   assert.equal(sentList.length, 2);
   assert.equal(raws.length, 2);
-  const html = raws[0];
+  // Parts are base64 encoded; decode them so the checks read the real HTML.
+  const html = raws[0].replace(/Content-Transfer-Encoding: base64\r\n\r\n([A-Za-z0-9+/=\r\n]+?)\r\n\r\n--/g, (_, b64) =>
+    `\r\n\r\n${Buffer.from(b64.replace(/\r\n/g, ''), 'base64').toString('utf8')}\r\n\r\n--`
+  );
   assert.ok(/^From: "H" <f@gmail.com>/m.test(html), 'From uses the account name, not DeliverIQ');
   const token = html.match(/\/t\/o\/([^".]+)\.gif/)?.[1];
   assert.ok(token, 'open pixel present');
@@ -86,6 +89,14 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   const after = (await cs.listCampaignsWithStats()).find((row) => row.id === fresh.id);
   assert.equal(after.totals.opened, 1);
   assert.equal(after.totals.sent, 2);
+
+  // A click outranks an open, and a later open never downgrades it.
+  await cs.applyEngagementEvent({ campaignId: parsed.campaignId, recipientId: parsed.recipientId, stepId: parsed.stepId, event: 'click' });
+  await cs.applyEngagementEvent({ campaignId: parsed.campaignId, recipientId: parsed.recipientId, stepId: parsed.stepId, event: 'open' });
+  const row = await prisma.campaignRecipient.findUnique({ where: { stepId_recipientId: { stepId: parsed.stepId, recipientId: parsed.recipientId } } });
+  assert.equal(row.status, 'clicked');
+  const clicked = (await cs.listCampaignsWithStats()).find((item) => item.id === fresh.id);
+  assert.equal(clicked.totals.opened, 1, 'a click also counts as opened');
 
   // Reconcile is idempotent.
   assert.equal((await cs.reconcileCampaignSteps()).length, 0);

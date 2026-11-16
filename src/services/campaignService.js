@@ -1156,6 +1156,7 @@ export async function sendTestEmail({ campaignId, to }) {
     stepId: step.id,
     unsubscribeUrl: `${env.appUrl}/unsubscribe.html`,
     userId: sender?.id || campaign.createdById,
+    campaignName: campaign.name,
   });
 }
 

@@ -366,6 +366,7 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       stepId: step.id,
       unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
       userId: sender.id,
+      campaignName: campaign.name,
     });
   } catch (err) {
     return handleSendError(err, { sender, campaign, step, recipient, hooks });

@@ -1,7 +1,7 @@
 import { env } from '../config/env.js';
 import { sgMail, sendgridEnabled } from '../config/sendgrid.js';
 import { sendViaGmail } from './gmailService.js';
-import { withEngagementTracking } from '../utils/tracking.js';
+import { withEngagementTracking, looksLikeHtml, plainTextToHtml } from '../utils/tracking.js';
 import { prisma } from '../lib/prisma.js';
 
 export function interpolate(template, vars) {
@@ -27,6 +27,22 @@ function withUnsubscribeFooter(html, unsubscribeUrl) {
 }
 
 /**
+ * Build the HTML that is actually sent: merge fields, plain text templates turned into
+ * HTML, the unsubscribe footer, then tracked links (bare URLs included) and the open pixel.
+ */
+export function renderEmailHtml({ html, name, to, campaignId, recipientId, stepId, unsubscribeUrl, campaignName }) {
+  const merged = interpolate(html, { name, email: to, unsubscribeUrl: unsubscribeUrl || '' });
+  const asHtml = looksLikeHtml(merged) ? merged : plainTextToHtml(merged);
+  return withEngagementTracking(withUnsubscribeFooter(asHtml, unsubscribeUrl), {
+    campaignId,
+    recipientId,
+    stepId,
+    unsubscribeUrl,
+    campaignName,
+  });
+}
+
+/**
  * Placeholder-aware SendGrid send.
  * When SENDGRID_DRY_RUN=true or the API key is a placeholder,
  * logs the payload instead of calling the network.
@@ -41,15 +57,19 @@ export async function sendCampaignEmail({
   stepId,
   unsubscribeUrl,
   userId,
+  campaignName,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to });
-  const renderedHtml = withEngagementTracking(
-    withUnsubscribeFooter(
-      interpolate(html, { name, email: to, unsubscribeUrl: unsubscribeUrl || '' }),
-      unsubscribeUrl
-    ),
-    { campaignId, recipientId, stepId, unsubscribeUrl }
-  );
+  const renderedHtml = renderEmailHtml({
+    html,
+    name,
+    to,
+    campaignId,
+    recipientId,
+    stepId,
+    unsubscribeUrl,
+    campaignName,
+  });
 
   let threadingInfo = {};
   if (stepId) {
