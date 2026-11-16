@@ -159,17 +159,29 @@ export async function getWorkspaceSender(workspaceId) {
   return getUserSender(null);
 }
 
-function htmlToPlainText(html) {
+/**
+ * Base64 body for a MIME part, wrapped at 76 characters. The parts used to be labelled
+ * quoted-printable without being encoded, so any "=" followed by two hex characters in a
+ * link (for example "utm_campaign=accountants") was decoded into a stray byte.
+ */
+export function mimeBase64(text) {
+  return Buffer.from(String(text), 'utf8').toString('base64').replace(/.{1,76}/g, '$&\r\n').trimEnd();
+}
+
+export function htmlToPlainText(html) {
   return html
     .replace(/<style[^>]*>.*?<\/style>/gis, '')
     .replace(/<script[^>]*>.*?<\/script>/gis, '')
-    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<br\s*\/?>\n?/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
     .replace(/<\/div>/gi, '\n')
     .replace(/<\/h[1-6]>/gi, '\n\n')
     .replace(/<li>/gi, '- ')
     .replace(/<\/li>/gi, '\n')
-    .replace(/<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+    .replace(/<a[^>]*href=["']([^"']*)["'][^>]*>([^<]*)<\/a>/gi, (_, href, text) =>
+      // A link whose text is itself a URL shows just the (tracked) link in plain text.
+      /^\s*https?:\/\//i.test(text) ? href : `${text} (${href})`
+    )
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
@@ -243,15 +255,15 @@ export async function sendViaGmail({
     '',
     `--${boundary}`,
     'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: quoted-printable',
+    'Content-Transfer-Encoding: base64',
     '',
-    plainText,
+    mimeBase64(plainText),
     '',
     `--${boundary}`,
     'Content-Type: text/html; charset=UTF-8',
-    'Content-Transfer-Encoding: quoted-printable',
+    'Content-Transfer-Encoding: base64',
     '',
-    html,
+    mimeBase64(html),
     '',
     `--${boundary}--`,
   ].join('\r\n');

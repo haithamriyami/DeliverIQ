@@ -34,7 +34,25 @@ function trimSlash(url) {
   return String(url || '').replace(/\/+$/, '');
 }
 
-const appUrl = trimSlash(process.env.APP_URL ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`);
+/**
+ * Public base URL used in tracking pixels, click links and unsubscribe links.
+ * APP_URL wins. On Vercel without APP_URL, fall back to the production domain (or the
+ * deployment URL) so emails never point at 127.0.0.1, and warn so APP_URL gets set.
+ */
+export function resolveAppUrl(source = process.env) {
+  if (source.APP_URL) {
+    return trimSlash(source.APP_URL);
+  }
+  const vercelHost = source.VERCEL_PROJECT_PRODUCTION_URL || source.VERCEL_URL;
+  if (vercelHost) {
+    const url = trimSlash(/^https?:\/\//i.test(vercelHost) ? vercelHost : `https://${vercelHost}`);
+    console.warn(`[env] APP_URL is not set, using ${url} for tracking and unsubscribe links. Set APP_URL to be sure.`);
+    return url;
+  }
+  return `http://127.0.0.1:${source.PORT ?? 3000}`;
+}
+
+const appUrl = resolveAppUrl();
 
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
