@@ -15,15 +15,17 @@ test('inbox sync is throttled, leased, incremental, and quota errors never pause
   const scheduler = await import('../src/services/sendScheduler.js');
   const cs = await import('../src/services/campaignService.js');
 
-  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'workspace']) {
+  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
   const ws = await prisma.workspace.create({ data: { name: 'W', dailySendCap: 300 } });
   const user = await prisma.user.create({
-    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: 'enc' },
+    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id },
   });
   await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
-  const me = () => prisma.user.findUnique({ where: { id: user.id } });
+  const { linkGmail } = await import('./helpers/gmail.js');
+  const acct = await linkGmail({ userId: user.id, workspaceId: ws.id, email: 'f@gmail.com', refreshToken: 'enc' });
+  const me = () => prisma.gmailAccount.findUnique({ where: { id: acct.id } });
 
   const calls = [];
   let fail = null;
@@ -101,17 +103,17 @@ test('inbox sync is throttled, leased, incremental, and quota errors never pause
   assert.equal((await prisma.recipient.findUnique({ where: { id: r1.id } })).status, 'active', 'not a bounce');
 
   // Auto recover: old quota pauses resume, real pauses stay.
-  await prisma.user.update({
-    where: { id: user.id },
+  await prisma.gmailAccount.update({
+    where: { id: acct.id },
     data: { sendingPausedAt: new Date(), sendingPausedReason: `Gmail returned a rate limit, policy or account restriction error, so all sending from this account is paused. Check the Gmail account, then press Resume. Gmail said: ${QUOTA_MSG}` },
   });
-  const other = await prisma.user.create({
-    data: { email: 'b@t.dev', name: 'B', passwordHash: 'x', workspaceId: ws.id, gmailEmail: 'b@gmail.com', gmailRefreshToken: 'enc', sendingPausedAt: new Date(), sendingPausedReason: 'Gmail said: Mail service not enabled: account suspended' },
+  const other = await prisma.gmailAccount.create({
+    data: { email: 'b@gmail.com', refreshToken: 'enc', sendingPausedAt: new Date(), sendingPausedReason: 'Gmail said: Mail service not enabled: account suspended' },
   });
   assert.equal(await scheduler.resumeQuotaPausedSenders(), 1);
   assert.equal(await scheduler.resumeQuotaPausedSenders(), 0, 'idempotent');
   assert.equal((await me()).sendingPausedAt, null);
-  assert.notEqual((await prisma.user.findUnique({ where: { id: other.id } })).sendingPausedAt, null);
+  assert.notEqual((await prisma.gmailAccount.findUnique({ where: { id: other.id } })).sendingPausedAt, null);
 
   await prisma.$disconnect();
 });

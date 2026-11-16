@@ -6,7 +6,7 @@
  * still sendable, starts the next run by calling /cron/send-tick on itself. A lease row
  * makes sure only one run is active; a second trigger (cron, Send button, open tab,
  * external pinger) just returns. Even if two runs overlap, the atomic per account slot
- * claim in users.next_send_at prevents double sending.
+ * claim in gmail_accounts.next_send_at prevents double sending.
  */
 import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
@@ -41,13 +41,13 @@ export async function releaseLease(holder) {
 
 /** Is there anything that could be sent right now or within this run? */
 export async function hasSendableWork() {
-  const senders = await prisma.user.findMany({ where: { gmailRefreshToken: { not: null }, sendingPausedAt: null } });
+  const senders = await prisma.gmailAccount.findMany({ where: { refreshToken: { not: null }, sendingPausedAt: null } });
   for (const sender of senders) {
     // Work in paused workspaces is skipped by nextPendingForSender.
     const work = await nextPendingForSender(sender);
     if (!work) continue;
     const settings = normalizeSendSettings(await workspaceSendSettings(work.campaign.workspaceId));
-    if ((await sentTodayCount(sender.id)) >= settings.dailySendCap) continue;
+    if ((await sentTodayCount(sender)) >= settings.dailySendCap) continue;
     return true;
   }
   return false;

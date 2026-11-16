@@ -48,7 +48,8 @@ const inviteSchema = z.object({
 const acceptSchema = z.object({
   body: z.object({
     token: z.string().min(8),
-    name: z.string().min(1),
+    // Not needed when the invited email already has an account.
+    name: z.string().optional(),
     password: z.string().min(8),
   }),
   params: z.any().optional(),
@@ -116,7 +117,7 @@ export const me = [
         fromEmail: env.sendgrid.fromEmail,
         fromName: env.sendgrid.fromName,
       },
-      google: await gmailService.gmailStatus(req.user.id),
+      google: await gmailService.gmailStatus(req.user.id, req.user.workspaceId),
       tracking: {
         appUrl: env.appUrl,
         public: !isPrivateAppUrl(env.appUrl),
@@ -144,14 +145,16 @@ export const invitePreview = asyncHandler(async (req, res) => {
   res.json({
     email: invite.email,
     workspaceName: invite.workspace.name,
+    existingAccount: await authService.inviteHasAccount(invite),
   });
 });
 
 export const acceptInvite = [
   validate(acceptSchema),
   asyncHandler(async (req, res) => {
-    const user = await activeUser(await authService.acceptInvite(req.validated.body));
-    setAuthCookie(res, user);
+    const joined = await authService.acceptInvite(req.validated.body);
+    const user = await activeUser(joined, joined.workspaceId);
+    setAuthCookie(res, user, user.workspaceId);
     res.json({ user: publicUser(user) });
   }),
 ];

@@ -14,14 +14,16 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   const cs = await import('../src/services/campaignService.js');
   const hooks = { recordSend: cs.recordSend, recordBounce: cs.recordBounce, maybeCompleteCampaign: cs.maybeCompleteCampaign };
 
-  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'workspace']) {
+  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
   const ws = await prisma.workspace.create({ data: { name: 'W' } });
   const user = await prisma.user.create({
-    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: 'enc' },
+    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id },
   });
   await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const { linkGmail } = await import('./helpers/gmail.js');
+  const acct = await linkGmail({ userId: user.id, workspaceId: ws.id, email: 'f@gmail.com', refreshToken: 'enc' });
   const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
   const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
   let n = 0;
@@ -35,9 +37,9 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   const sends = [];
   const send = async (args) => { sends.push(args); n += 1; return { messageId: `m${n}`, threadId: `t${n}` }; };
   const settings = await scheduler.workspaceSendSettings(ws.id);
-  const me = () => prisma.user.findUnique({ where: { id: user.id } });
+  const me = () => prisma.gmailAccount.findUnique({ where: { id: acct.id } });
   const tick = async () => {
-    await prisma.user.update({ where: { id: user.id }, data: { nextSendAt: null } });
+    await prisma.gmailAccount.update({ where: { id: acct.id }, data: { nextSendAt: null } });
     return scheduler.sendOneForSender(await me(), settings, { now: new Date(), send, hooks });
   };
 
@@ -57,7 +59,7 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   const racing = await makeCampaign('racing');
   const work = await scheduler.nextPendingForSender(await me());
   assert.equal(work.campaign.id, racing.id);
-  const args = { senderId: user.id, workspaceId: ws.id, stepId: work.step.id, campaignId: racing.id, recipientId: work.recipient.id };
+  const args = { senderId: acct.id, workspaceId: ws.id, stepId: work.step.id, campaignId: racing.id, recipientId: work.recipient.id };
   assert.equal(await scheduler.blockReasonAtSendTime(args), null);
   await scheduler.pauseCampaign(racing.id, 'Stopped');
   assert.equal(await scheduler.blockReasonAtSendTime(args), 'campaign_paused');
@@ -70,7 +72,7 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   //    contact is NOT marked bounced.
   const inflight = await makeCampaign('inflight');
   const deletingSend = async (a) => { await cs.deleteCampaign(inflight.id); return send(a); };
-  await prisma.user.update({ where: { id: user.id }, data: { nextSendAt: null } });
+  await prisma.gmailAccount.update({ where: { id: acct.id }, data: { nextSendAt: null } });
   const r = await scheduler.sendOneForSender(await me(), settings, { now: new Date(), send: deletingSend, hooks });
   assert.equal(r.sent, true);
   const person = await prisma.recipient.findFirst({ where: { email: r.email } });
@@ -84,7 +86,7 @@ test('deleted, stopped, paused and kill-switched campaigns never send', { skip: 
   // Work in a paused workspace is held back; look it up explicitly.
   const w2 = await scheduler.nextPendingForSender(await me(), { pausedWorkspaces: true });
   assert.equal(
-    await scheduler.blockReasonAtSendTime({ senderId: user.id, workspaceId: ws.id, stepId: w2.step.id, campaignId: live.id, recipientId: w2.recipient.id }),
+    await scheduler.blockReasonAtSendTime({ senderId: acct.id, workspaceId: ws.id, stepId: w2.step.id, campaignId: live.id, recipientId: w2.recipient.id }),
     'global_paused'
   );
   const tickResult = await cs.runSchedulerTick({ budgetMs: 0 });

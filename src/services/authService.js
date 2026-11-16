@@ -137,11 +137,20 @@ export async function updatePassword(userId, { currentPassword, newPassword }) {
   return { ok: true };
 }
 
+/**
+ * Invite someone into this workspace. People who already have a DeliverIQ account can be
+ * invited too: they keep their own workspaces and gain this one, with its own role.
+ */
 export async function createInvite({ email, workspaceId, invitedById }) {
   const normalized = email.toLowerCase();
   const existingUser = await prisma.user.findUnique({ where: { email: normalized } });
   if (existingUser) {
-    throw new HttpError(409, 'That email already has an account');
+    const member = await prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: existingUser.id } },
+    });
+    if (member) {
+      throw new HttpError(409, 'That person is already a member of this workspace');
+    }
   }
 
   await prisma.invite.updateMany({
@@ -162,6 +171,7 @@ export async function createInvite({ email, workspaceId, invitedById }) {
 
   return {
     ...invite,
+    existingAccount: Boolean(existingUser),
     inviteUrl: `${env.appUrl}/#invite=${invite.token}`,
   };
 }
@@ -179,21 +189,54 @@ export async function getInvite(token) {
   return invite;
 }
 
+/** Whether the invited email already has an account (they then join with their password). */
+export async function inviteHasAccount(invite) {
+  return Boolean(await prisma.user.findUnique({ where: { email: invite.email }, select: { id: true } }));
+}
+
+/**
+ * Accept an invite. A new person creates their account here. Someone who already has an
+ * account confirms with their existing password and is added to this workspace as well;
+ * their other workspaces are untouched.
+ */
 export async function acceptInvite({ token, name, password }) {
   const invite = await getInvite(token);
   const existing = await prisma.user.findUnique({
     where: { email: invite.email },
   });
+
   if (existing) {
-    throw new HttpError(409, 'That email already has an account');
+    const ok = await bcrypt.compare(password, existing.passwordHash);
+    if (!ok) {
+      throw new HttpError(401, 'Enter your existing DeliverIQ password to join this workspace');
+    }
+    return prisma.$transaction(async (tx) => {
+      const already = await tx.workspaceMember.findUnique({
+        where: { workspaceId_userId: { workspaceId: invite.workspaceId, userId: existing.id } },
+      });
+      if (!already) {
+        await tx.workspaceMember.create({
+          data: { workspaceId: invite.workspaceId, userId: existing.id, role: invite.role },
+        });
+      }
+      await tx.invite.update({ where: { id: invite.id }, data: { acceptedAt: new Date() } });
+      return tx.user.update({
+        where: { id: existing.id },
+        data: { workspaceId: invite.workspaceId },
+        include: { workspace: true },
+      });
+    });
   }
 
+  if (!String(name || '').trim()) {
+    throw new HttpError(400, 'Your name is required');
+  }
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
   const user = await prisma.$transaction(async (tx) => {
     const created = await tx.user.create({
       data: {
-        name,
+        name: String(name).trim(),
         email: invite.email,
         passwordHash,
         role: invite.role,

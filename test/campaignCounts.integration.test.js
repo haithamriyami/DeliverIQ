@@ -25,14 +25,16 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   const { parseTrackingToken } = await import('../src/utils/tracking.js');
   const hooks = { recordSend: cs.recordSend, recordBounce: cs.recordBounce, maybeCompleteCampaign: cs.maybeCompleteCampaign };
 
-  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'workspace']) {
+  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
   const ws = await prisma.workspace.create({ data: { name: 'W' } });
   const user = await prisma.user.create({
-    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: encToken },
+    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id },
   });
   await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const { linkGmail } = await import('./helpers/gmail.js');
+  const acct = await linkGmail({ userId: user.id, workspaceId: ws.id, email: 'f@gmail.com', refreshToken: encToken });
   const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
   const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi <a href="https://example.com">link</a></p>' } });
   const mk = async (prefix, n) => {
@@ -55,7 +57,7 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   const settings = await scheduler.workspaceSendSettings(ws.id);
   let now = Date.now();
   for (let i = 0; i < 2; i += 1) {
-    const u = await prisma.user.findUnique({ where: { id: user.id } });
+    const u = await prisma.gmailAccount.findUnique({ where: { id: acct.id } });
     const r = await scheduler.sendOneForSender(u, settings, { now: new Date(now), hooks });
     assert.equal(r.sent, true);
     assert.equal(r.campaignId, fresh.id, 'must send the visible queued campaign, not the stale old step');
@@ -69,7 +71,7 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   assert.equal(c.status, 'sending');
   const o = rows.find((row) => row.id === old.id);
   assert.equal(o.steps[0].status, 'completed', 'superseded Email 1 is closed');
-  assert.equal(await scheduler.queuedCountForSender(user), 1);
+  assert.equal(await scheduler.queuedCountForSender(acct), 1);
 
   // Sent list and tracking for a throttled send.
   const sentList = await cs.listCampaignAudience(fresh.id, 'sent');

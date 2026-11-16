@@ -29,15 +29,17 @@ test('background run keeps sending at the gap, one run at a time, overlap never 
   const cs = await import('../src/services/campaignService.js');
   const bg = await import('../src/services/backgroundSender.js');
 
-  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'workspace']) {
+  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
   // Minimum allowed gap, no jitter, so the test runs in seconds.
   const ws = await prisma.workspace.create({ data: { name: 'W', sendGapSeconds: 5, sendJitterSeconds: 0 } });
   const user = await prisma.user.create({
-    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: encToken },
+    data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id },
   });
   await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const { linkGmail } = await import('./helpers/gmail.js');
+  const acct = await linkGmail({ userId: user.id, workspaceId: ws.id, email: 'f@gmail.com', refreshToken: encToken });
   const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
   const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
   const ids = [];
@@ -86,7 +88,7 @@ test('background run keeps sending at the gap, one run at a time, overlap never 
 
   // Kill switch: a run sends nothing and does not chain.
   await prisma.workspace.update({ where: { id: ws.id }, data: { sendingPausedAt: new Date() } });
-  await prisma.user.update({ where: { id: user.id }, data: { nextSendAt: null } });
+  await prisma.gmailAccount.update({ where: { id: acct.id }, data: { nextSendAt: null } });
   const before = sentAt.length;
   const paused = await bg.runBackgroundSender({ budgetMs: 3000, trigger });
   assert.equal(paused.sent, 0);

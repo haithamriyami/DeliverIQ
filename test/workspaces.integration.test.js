@@ -52,7 +52,7 @@ test('workspaces keep contacts, lists, templates and campaigns apart', { skip: !
   const cs = await import('../src/services/campaignService.js');
   const rs = await import('../src/services/recipientService.js');
 
-  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'invite', 'workspaceMember', 'user', 'workspace']) {
+  for (const table of ['schedulerLease', 'inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'invite', 'workspaceMember', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
 
@@ -184,9 +184,12 @@ test('workspaces keep contacts, lists, templates and campaigns apart', { skip: !
     // A is owner of FinanceBridge but the helper is only a member there: owner actions refused.
     assert.equal((await api(helper, 'DELETE', `/recipients/lists/${listA.id}?mode=list`)).status, 403);
 
-    // 8. Sending: one Gmail account, two workspaces. The gap and the daily count are shared.
+    // 8. Sending: the same Gmail address linked in two workspaces. The gap and the daily
+    //    count are shared per address.
     const userA = await prisma.user.findUnique({ where: { email: 'h@fb.dev' } });
-    await prisma.user.update({ where: { id: userA.id }, data: { gmailEmail: 'h@gmail.com', gmailRefreshToken: 'enc' } });
+    const { linkGmail } = await import('./helpers/gmail.js');
+    const acctA = await linkGmail({ userId: userA.id, workspaceId: wsA, email: 'h@gmail.com' });
+    await linkGmail({ userId: userA.id, workspaceId: wsA2, email: 'h@gmail.com' });
     await prisma.workspace.update({ where: { id: wsA }, data: { dailySendCap: 2 } });
     await prisma.workspace.update({ where: { id: wsA2 }, data: { dailySendCap: 2 } });
     const listA2 = await prisma.contactList.create({ data: { workspaceId: wsA2, name: 'Clients' } });
@@ -206,7 +209,8 @@ test('workspaces keep contacts, lists, templates and campaigns apart', { skip: !
 
     // B has no Gmail, so nobody can send B's campaigns, and A's Gmail is never borrowed.
     assert.equal(await scheduler.resolveSenderUser(null, wsB), null);
-    assert.equal((await scheduler.resolveSenderUser(userA.id, wsA2)).id, userA.id);
+    assert.equal((await scheduler.resolveSenderUser(userA.id, wsA2)).id, acctA.id);
+    assert.equal((await scheduler.resolveSenderUser(userA.id, wsA2)).userId, userA.id);
 
     // Kill switch in FinanceBridge does not stop Fiverr, and the other way round.
     await scheduler.setGlobalPause(wsA, true, 'test');
@@ -217,8 +221,8 @@ test('workspaces keep contacts, lists, templates and campaigns apart', { skip: !
     };
     const hooks = { recordSend: cs.recordSend, recordBounce: cs.recordBounce, maybeCompleteCampaign: cs.maybeCompleteCampaign };
     const fresh = async () => {
-      await prisma.user.update({ where: { id: userA.id }, data: { nextSendAt: null } });
-      return prisma.user.findUnique({ where: { id: userA.id } });
+      await prisma.gmailAccount.update({ where: { id: acctA.id }, data: { nextSendAt: null } });
+      return prisma.gmailAccount.findUnique({ where: { id: acctA.id } });
     };
     let r = await scheduler.sendOneForSender(await fresh(), null, { send, hooks });
     assert.equal(r.sent, true);
@@ -246,7 +250,11 @@ test('workspaces keep contacts, lists, templates and campaigns apart', { skip: !
     // 9. A bounce seen in A's Gmail only marks contacts in workspaces A sends for.
     const sharedB = await prisma.recipient.findUnique({ where: { id: personB.id } });
     await prisma.recipient.update({ where: { id: sharedB.id }, data: { status: 'active' } });
-    await cs.applyBounceNotices([{ email: 'shared@client.dev', reason: 'No such user' }], userA);
+    const stepA = await prisma.campaignStep.findFirst({ where: { campaign: { workspaceId: wsA } } });
+    await prisma.campaignRecipient.create({
+      data: { campaignId: stepA.campaignId, stepId: stepA.id, recipientId: personA.id, status: 'sent', sentAt: new Date(), senderId: userA.id, senderAccountId: acctA.id },
+    });
+    await cs.applyBounceNotices([{ email: 'shared@client.dev', reason: 'No such user' }], acctA);
     assert.equal((await prisma.recipient.findUnique({ where: { id: personA.id } })).status, 'bounced');
     assert.equal((await prisma.recipient.findUnique({ where: { id: personB.id } })).status, 'active', 'B is untouched');
   } finally {
