@@ -2,7 +2,7 @@
  * Throttled sender. Works on Vercel serverless:
  *
  * - Nothing sleeps for a whole campaign. Pressing Send only marks the step as queued.
- * - Each sender (connected Gmail account) has users.next_send_at in Postgres.
+ * - Each sender (connected Gmail address) has gmail_accounts.next_send_at in Postgres.
  *   Before every send we claim the slot with one atomic UPDATE
  *   (WHERE next_send_at IS NULL OR next_send_at <= now()), which also moves
  *   next_send_at forward by the gap (default 10 to 15 seconds). Two overlapping ticks (cron + browser)
@@ -10,14 +10,16 @@
  * - runSendTick() sends at most one due email per sender, then, if the next slot
  *   still fits inside the time budget of this invocation, waits for it and repeats.
  *   With a 50 s budget a tick sends 1 or 2 emails per account and then exits.
- * - The daily cap counts campaign_recipients rows with sender_id = account and
+ * - The daily cap counts campaign_recipients rows with sender_account_id = account and
  *   sent_at since Africa/Nairobi midnight. Over the cap, emails simply stay queued.
- * - Workspaces: a Gmail account belongs to one user, and that user can send for every
- *   workspace they are a member of. The gap (users.next_send_at) and the daily count are
- *   per Gmail account, shared by all those workspaces, so two workspaces using the same
- *   Gmail can never break the gap or the daily cap. The gap length, jitter and cap number
- *   come from the settings of the workspace whose email is being sent. The kill switch is
- *   per workspace.
+ * - Workspaces: Gmail is connected per workspace. Each workspace member links the Gmail
+ *   they send from in that workspace (workspace_members.gmail_account_id), so one login can
+ *   send from one address in FinanceBridge and another in a personal workspace. A campaign
+ *   only ever sends from a Gmail linked in its own workspace.
+ * - If the same Gmail address is linked in two workspaces, both use the same
+ *   gmail_accounts row, so the gap and the daily count stay shared per address and can
+ *   never be broken. The gap length, jitter and cap number come from the settings of the
+ *   workspace whose email is being sent. The kill switch is per workspace.
  */
 import { prisma } from '../lib/prisma.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
@@ -76,7 +78,7 @@ export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, cam
     workspaceId = campaign.workspaceId;
   }
   const [sender, globalPaused, step, recipient, already, member] = await Promise.all([
-    prisma.user.findUnique({ where: { id: senderId }, select: { sendingPausedAt: true, gmailRefreshToken: true } }),
+    prisma.gmailAccount.findUnique({ where: { id: senderId }, select: { sendingPausedAt: true, refreshToken: true } }),
     globalPauseFor(workspaceId),
     prisma.campaignStep.findUnique({
       where: { id: stepId },
@@ -96,10 +98,10 @@ export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, cam
     }),
     prisma.recipient.findUnique({ where: { id: recipientId } }),
     prisma.campaignRecipient.findUnique({ where: { stepId_recipientId: { stepId, recipientId } }, select: { id: true } }),
-    prisma.workspaceMember.findUnique({ where: { workspaceId_userId: { workspaceId, userId: senderId } }, select: { id: true } }),
+    prisma.workspaceMember.findFirst({ where: { workspaceId, gmailAccountId: senderId }, select: { id: true } }),
   ]);
   if (globalPaused) return 'global_paused';
-  if (!sender?.gmailRefreshToken || sender.sendingPausedAt) return 'sender_paused';
+  if (!sender?.refreshToken || sender.sendingPausedAt) return 'sender_paused';
   if (!step || !step.campaign || step.campaignId !== campaignId) return 'campaign_deleted';
   if (step.campaign.workspaceId !== workspaceId) return 'workspace_mismatch';
   if (!member) return 'sender_not_in_workspace';
@@ -116,34 +118,60 @@ export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, cam
 
 /** Give a claimed slot back when the final check stops the send, so the sender is not delayed. */
 async function releaseSlot(senderId, previousNextSendAt) {
-  await prisma.user.update({ where: { id: senderId }, data: { nextSendAt: previousNextSendAt || null } });
+  await prisma.gmailAccount.update({ where: { id: senderId }, data: { nextSendAt: previousNextSendAt || null } });
 }
 
 /**
- * Which connected Gmail user sends for this campaign: its creator, if they are still a
- * member of the campaign's workspace and have Gmail connected; otherwise the first
- * workspace owner, then member, with Gmail. Never a Gmail account from outside the workspace.
+ * Which Gmail sends for this campaign: the one its creator linked in the campaign's
+ * workspace, otherwise the one a workspace owner linked, otherwise any member's. Only
+ * Gmail linked in this workspace is ever used. Returns the gmail_accounts row plus
+ * userId (the member it is linked through), or null.
  */
-export async function resolveSenderUser(createdById, workspaceId) {
+export async function resolveSender(createdById, workspaceId) {
   if (!workspaceId) return null;
-  if (createdById) {
-    const owner = await prisma.user.findFirst({
-      where: { id: createdById, gmailRefreshToken: { not: null }, memberships: { some: { workspaceId } } },
-    });
-    if (owner) return owner;
-  }
   const members = await prisma.workspaceMember.findMany({
-    where: { workspaceId, user: { gmailRefreshToken: { not: null } } },
-    include: { user: true },
+    where: { workspaceId, gmailAccount: { refreshToken: { not: null } } },
+    include: { gmailAccount: true },
     orderBy: { createdAt: 'asc' },
   });
-  const pick = members.find((row) => row.role === 'owner') || members[0];
-  return pick?.user || null;
+  const pick =
+    (createdById && members.find((row) => row.userId === createdById)) ||
+    members.find((row) => row.role === 'owner') ||
+    members[0];
+  return pick ? { ...pick.gmailAccount, userId: pick.userId } : null;
 }
 
-export async function sentTodayCount(senderId, now = new Date()) {
+/** Old name, kept for callers and tests. */
+export const resolveSenderUser = resolveSender;
+
+/** Gmail linked by this member in this workspace (with a token), or null. */
+export async function memberSender(userId, workspaceId) {
+  const member = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    include: { gmailAccount: true },
+  });
+  return member?.gmailAccount?.refreshToken ? { ...member.gmailAccount, userId } : null;
+}
+
+async function accountRow(account) {
+  if (account && typeof account === 'object') return account;
+  return account ? prisma.gmailAccount.findUnique({ where: { id: account } }) : null;
+}
+
+/**
+ * Emails sent today from one Gmail address, in every workspace. Sends recorded before
+ * sender_account_id existed are counted through the user who connected the address.
+ */
+export async function sentTodayCount(account, now = new Date(), { workspaceId } = {}) {
+  const row = await accountRow(account);
+  if (!row) return 0;
+  const legacy = row.connectedById ? [{ senderAccountId: null, senderId: row.connectedById }] : [];
   return prisma.campaignRecipient.count({
-    where: { senderId, sentAt: { gte: sendDayStart(now) } },
+    where: {
+      sentAt: { gte: sendDayStart(now) },
+      OR: [{ senderAccountId: row.id }, ...legacy],
+      ...(workspaceId ? { campaign: { workspaceId } } : {}),
+    },
   });
 }
 
@@ -152,7 +180,7 @@ export async function sentTodayCount(senderId, now = new Date()) {
  */
 export async function claimSendSlot(senderId, settings, now = new Date()) {
   const next = computeNextSendAt(now, settings);
-  const result = await prisma.user.updateMany({
+  const result = await prisma.gmailAccount.updateMany({
     where: {
       id: senderId,
       sendingPausedAt: null,
@@ -164,7 +192,7 @@ export async function claimSendSlot(senderId, settings, now = new Date()) {
 }
 
 export async function pauseSender(senderId, reason) {
-  await prisma.user.update({
+  await prisma.gmailAccount.update({
     where: { id: senderId },
     data: { sendingPausedAt: new Date(), sendingPausedReason: String(reason).slice(0, 1000) },
   });
@@ -177,7 +205,7 @@ export async function pauseSender(senderId, reason) {
  * Idempotent; runs on every scheduler tick and status read.
  */
 export async function resumeQuotaPausedSenders() {
-  const paused = await prisma.user.findMany({
+  const paused = await prisma.gmailAccount.findMany({
     where: {
       sendingPausedAt: { not: null },
       OR: QUOTA_PAUSE_MARKERS.map((marker) => ({ sendingPausedReason: { contains: marker } })),
@@ -186,7 +214,7 @@ export async function resumeQuotaPausedSenders() {
   });
   const ids = paused.filter((u) => isQuotaOnlyPauseReason(u.sendingPausedReason)).map((u) => u.id);
   if (!ids.length) return 0;
-  const result = await prisma.user.updateMany({
+  const result = await prisma.gmailAccount.updateMany({
     where: { id: { in: ids }, sendingPausedAt: { not: null } },
     data: { sendingPausedAt: null, sendingPausedReason: '' },
   });
@@ -198,12 +226,12 @@ export async function backOffSender(sender, err, now = new Date()) {
   const attempts = (sender.sendBackoffCount || 0) + 1;
   const wait = backoffMs(attempts, { baseMs: 60000, maxMs: 15 * 60000, retryAfter: retryAfterMs(err, now.getTime()) });
   const nextSendAt = new Date(now.getTime() + wait);
-  await prisma.user.update({ where: { id: sender.id }, data: { nextSendAt, sendBackoffCount: attempts } });
+  await prisma.gmailAccount.update({ where: { id: sender.id }, data: { nextSendAt, sendBackoffCount: attempts } });
   return nextSendAt;
 }
 
 export async function resumeSender(senderId) {
-  return prisma.user.update({
+  return prisma.gmailAccount.update({
     where: { id: senderId },
     data: { sendingPausedAt: null, sendingPausedReason: '' },
   });
@@ -290,7 +318,7 @@ export async function nextPendingForSender(sender, { pausedWorkspaces = false } 
   const steps = await queuedSteps({ pausedWorkspaces });
 
   for (const step of steps) {
-    const owner = await resolveSenderUser(step.campaign.createdById, step.campaign.workspaceId);
+    const owner = await resolveSender(step.campaign.createdById, step.campaign.workspaceId);
     if (!owner || owner.id !== sender.id) continue;
 
     const audience = step.recipientIds?.length ? step.recipientIds : step.campaign.recipientIds;
@@ -313,7 +341,7 @@ export async function nextPendingForSender(sender, { pausedWorkspaces = false } 
     });
     const recipient = candidates.find((row) => !done.has(row.id));
     if (recipient) {
-      return { step, campaign: step.campaign, recipient };
+      return { step, campaign: step.campaign, recipient, senderUserId: owner.userId };
     }
   }
   return null;
@@ -324,7 +352,7 @@ export async function queuedCountForSender(sender, workspaceId) {
   let total = 0;
   for (const step of steps) {
     if (workspaceId && step.campaign.workspaceId !== workspaceId) continue;
-    const owner = await resolveSenderUser(step.campaign.createdById, step.campaign.workspaceId);
+    const owner = await resolveSender(step.campaign.createdById, step.campaign.workspaceId);
     if (!owner || owner.id !== sender.id) continue;
     const audience = step.recipientIds?.length ? step.recipientIds : step.campaign.recipientIds;
     const [processed, candidates] = await Promise.all([
@@ -369,7 +397,7 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   // The gap length and cap come from the workspace being sent for; the count of emails
   // sent today is per Gmail account across every workspace.
   settings = settings || (await workspaceSendSettings(work.campaign.workspaceId));
-  const sentToday = await sentTodayCount(sender.id, now);
+  const sentToday = await sentTodayCount(sender, now);
   const decision = sendDecision({
     now,
     nextSendAt: sender.nextSendAt,
@@ -411,16 +439,17 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       recipientId: recipient.id,
       stepId: step.id,
       unsubscribeUrl: unsubscribeUrlFor(recipient.unsubscribeToken),
-      userId: sender.id,
+      accountId: sender.id,
+      userId: work.senderUserId,
       campaignName: campaign.name,
       workspaceId: campaign.workspaceId,
     });
   } catch (err) {
-    return handleSendError(err, { sender, campaign, step, recipient, hooks });
+    return handleSendError(err, { sender, campaign, step, recipient, hooks, senderUserId: work.senderUserId });
   }
 
   if (sender.sendBackoffCount) {
-    await prisma.user.update({ where: { id: sender.id }, data: { sendBackoffCount: 0 } }).catch(() => {});
+    await prisma.gmailAccount.update({ where: { id: sender.id }, data: { sendBackoffCount: 0 } }).catch(() => {});
   }
 
   // The email is out. Recording must never be mistaken for a send failure: if the campaign
@@ -432,7 +461,8 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       stepId: step.id,
       messageId: result?.messageId,
       threadId: result?.threadId,
-      senderId: sender.id,
+      senderId: work.senderUserId,
+      senderAccountId: sender.id,
     });
     await hooks.maybeCompleteCampaign?.(campaign.id, step.id);
   } catch (err) {
@@ -441,7 +471,7 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   return { sent: true, campaignId: campaign.id, stepId: step.id, email: recipient.email };
 }
 
-async function handleSendError(err, { sender, campaign, step, recipient, hooks }) {
+async function handleSendError(err, { sender, campaign, step, recipient, hooks, senderUserId }) {
   {
     const kind = classifySendError(err);
     console.error(`[send] ${kind} for ${recipient.email}: ${err.message}`);
@@ -458,7 +488,8 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks }
       recipientId: recipient.id,
       stepId: step.id,
       error: err.message,
-      senderId: sender.id,
+      senderId: senderUserId,
+      senderAccountId: sender.id,
     });
     await checkCampaignBounceRate(campaign.id);
     await hooks.maybeCompleteCampaign?.(campaign.id, step.id);
@@ -476,21 +507,21 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
 
   await resumeQuotaPausedSenders();
   for (;;) {
-    const senders = await prisma.user.findMany({
-      where: { gmailRefreshToken: { not: null }, sendingPausedAt: null },
+    const senders = await prisma.gmailAccount.findMany({
+      where: { refreshToken: { not: null }, sendingPausedAt: null },
     });
     let earliest = null;
     let anyWork = false;
     for (const sender of senders) {
       // Settings are read per email from the workspace being sent for.
       const result = await sendOneForSender(sender, null, { now: new Date(), hooks });
-      results.push({ sender: sender.gmailEmail, ...result });
+      results.push({ sender: sender.email, ...result });
       if (result.reason && result.reason !== 'gap' && result.reason !== 'bounced') {
         // idle, cap, paused, or stopped by the final check: nothing to wait for this tick.
         continue;
       }
       anyWork = true;
-      const fresh = await prisma.user.findUnique({ where: { id: sender.id }, select: { nextSendAt: true } });
+      const fresh = await prisma.gmailAccount.findUnique({ where: { id: sender.id }, select: { nextSendAt: true } });
       const at = fresh?.nextSendAt?.getTime() ?? Date.now();
       earliest = earliest == null ? at : Math.min(earliest, at);
     }
@@ -505,32 +536,42 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
 }
 
 /**
- * Per sender status for the UI, for one workspace: its members' Gmail accounts, emails
- * sent today by each account (all workspaces, because the cap is per account), emails
- * queued in this workspace, and this workspace's pauses.
+ * Per sender status for the UI, for one workspace: only the Gmail addresses linked in this
+ * workspace. sentTodayHere counts this workspace's emails; sentToday is the address total
+ * that the daily cap uses (it only differs when the same Gmail is linked in another
+ * workspace too). Queued counts and pauses are this workspace's only.
  */
 export async function sendingStatus(workspaceId) {
   await resumeQuotaPausedSenders();
-  const ws = workspaceId
-    ? await prisma.workspace.findUnique({ where: { id: workspaceId } })
-    : await prisma.workspace.findFirst({ orderBy: { createdAt: 'asc' } });
+  const ws = workspaceId ? await prisma.workspace.findUnique({ where: { id: workspaceId } }) : null;
   const settings = normalizeSendSettings(ws || {});
   const now = new Date();
-  const senders = await prisma.user.findMany({
-    where: {
-      gmailRefreshToken: { not: null },
-      ...(ws ? { memberships: { some: { workspaceId: ws.id } } } : {}),
-    },
-    orderBy: { createdAt: 'asc' },
-  });
+  const links = ws
+    ? await prisma.workspaceMember.findMany({
+        where: { workspaceId: ws.id, gmailAccount: { refreshToken: { not: null } } },
+        include: { gmailAccount: true, user: { select: { id: true, name: true } } },
+        orderBy: { createdAt: 'asc' },
+      })
+    : [];
   const rows = [];
-  for (const sender of senders) {
-    const [sentToday, queued] = await Promise.all([sentTodayCount(sender.id, now), queuedCountForSender(sender, ws?.id)]);
+  const seen = new Set();
+  for (const link of links) {
+    const sender = link.gmailAccount;
+    if (seen.has(sender.id)) continue;
+    seen.add(sender.id);
+    const [sentToday, sentTodayHere, queued] = await Promise.all([
+      sentTodayCount(sender, now),
+      sentTodayCount(sender, now, { workspaceId: ws.id }),
+      queuedCountForSender(sender, ws.id),
+    ]);
     rows.push({
-      userId: sender.id,
-      email: sender.gmailEmail,
-      name: sender.name,
+      accountId: sender.id,
+      userId: link.userId,
+      email: sender.email,
+      name: link.user?.name || '',
       sentToday,
+      sentTodayHere,
+      sharedWithOtherWorkspaces: sentToday !== sentTodayHere,
       queued,
       dailyCap: settings.dailySendCap,
       capReached: sentToday >= settings.dailySendCap,
@@ -547,10 +588,12 @@ export async function sendingStatus(workspaceId) {
       pausedReason: sender.sendingPausedReason,
     });
   }
-  const pausedCampaigns = await prisma.campaign.findMany({
-    where: { pausedAt: { not: null }, ...(ws ? { workspaceId: ws.id } : {}) },
-    select: { id: true, name: true, pausedAt: true, pausedReason: true },
-  });
+  const pausedCampaigns = ws
+    ? await prisma.campaign.findMany({
+        where: { pausedAt: { not: null }, workspaceId: ws.id },
+        select: { id: true, name: true, pausedAt: true, pausedReason: true },
+      })
+    : [];
   return {
     settings,
     senders: rows,

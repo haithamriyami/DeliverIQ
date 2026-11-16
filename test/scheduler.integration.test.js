@@ -16,15 +16,17 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
     maybeCompleteCampaign: campaignService.maybeCompleteCampaign,
   };
 
-  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'workspace']) {
+  for (const table of ['inboundReply', 'campaignRecipient', 'campaignStep', 'campaign', 'recipient', 'contactList', 'template', 'user', 'gmailAccount', 'workspace']) {
     await prisma[table].deleteMany({});
   }
 
   const ws = await prisma.workspace.create({ data: { name: 'Test', dailySendCap: 3 } });
   const user = await prisma.user.create({
-    data: { email: 'o@test.dev', name: 'Haitham Soud', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'o@gmail.com', gmailRefreshToken: 'enc' },
+    data: { email: 'o@test.dev', name: 'Haitham Soud', passwordHash: 'x', role: 'owner', workspaceId: ws.id },
   });
   await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const { linkGmail } = await import('./helpers/gmail.js');
+  const acct = await linkGmail({ userId: user.id, workspaceId: ws.id, email: 'o@gmail.com' });
   const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
   const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi {{name}}</p>' } });
   const people = [];
@@ -40,7 +42,7 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
   const sent = [];
   const send = async ({ to }) => { sent.push(to); return { messageId: `m-${to}`, threadId: `t-${to}` }; };
   const settings = await scheduler.workspaceSendSettings(ws.id);
-  const fresh = () => prisma.user.findUnique({ where: { id: user.id } });
+  const fresh = () => prisma.gmailAccount.findUnique({ where: { id: acct.id } });
 
   // 10:00 Nairobi = 07:00 UTC.
   let now = new Date('2026-10-14T07:00:00Z');
@@ -70,7 +72,7 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
 
   // Cap is 3 for this test workspace. Rows have sentAt = real now, so count with real now.
   const realNow = new Date();
-  await prisma.user.update({ where: { id: user.id }, data: { nextSendAt: null } });
+  await prisma.gmailAccount.update({ where: { id: acct.id }, data: { nextSendAt: null } });
   r = await scheduler.sendOneForSender(await fresh(), settings, { now: realNow, send, hooks });
   assert.equal(r.reason, 'daily_cap');
   assert.equal(await scheduler.queuedCountForSender(await fresh()), 2);
@@ -84,7 +86,7 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
   assert.ok(!step.recipientIds.includes(people[1].id));
 
   // Paused sender never sends.
-  await scheduler.pauseSender(user.id, 'test');
+  await scheduler.pauseSender(acct.id, 'test');
   r = await scheduler.sendOneForSender(await fresh(), await scheduler.workspaceSendSettings(ws.id), { now: new Date(Date.now() + 3600000), send, hooks });
   assert.equal(r.reason, 'paused');
 

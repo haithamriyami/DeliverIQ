@@ -56,7 +56,50 @@ export function gmailAuthUrl(state) {
   });
 }
 
-export async function connectGmail({ userId, code }) {
+/**
+ * Connect a Gmail address for one member in one workspace. Each workspace keeps its own
+ * Gmail, so connecting in a personal workspace never changes FinanceBridge sending.
+ * One gmail_accounts row per address: linking the same address in a second workspace
+ * reuses it, so the send gap and daily count stay shared for that address.
+ */
+export async function connectGmail({ userId, workspaceId, code, exchange }) {
+  if (!workspaceId) {
+    throw new HttpError(400, 'Open the workspace you want to connect Gmail for, then try again.');
+  }
+  const member = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
+  });
+  if (!member) {
+    throw new HttpError(403, 'You are not a member of that workspace');
+  }
+
+  const { email, refreshToken } = exchange ? await exchange(code) : await exchangeCode(code);
+  const address = String(email || '').toLowerCase();
+  if (!address) {
+    throw new HttpError(400, 'Google did not say which Gmail address was connected. Try again.');
+  }
+
+  const now = new Date();
+  const account = await prisma.gmailAccount.upsert({
+    where: { email: address },
+    create: { email: address, refreshToken: encrypt(refreshToken), connectedAt: now, connectedById: userId },
+    update: { refreshToken: encrypt(refreshToken), connectedAt: now },
+  });
+  await prisma.workspaceMember.update({
+    where: { id: member.id },
+    data: { gmailAccountId: account.id },
+  });
+  // Switching this workspace to a different address: forget the old token if nothing uses it.
+  if (member.gmailAccountId && member.gmailAccountId !== account.id) {
+    const stillUsed = await prisma.workspaceMember.count({ where: { gmailAccountId: member.gmailAccountId } });
+    if (!stillUsed) {
+      await prisma.gmailAccount.update({ where: { id: member.gmailAccountId }, data: { refreshToken: null } });
+    }
+  }
+  return account;
+}
+
+async function exchangeCode(code) {
   const client = createOAuthClient();
   const { tokens } = await client.getToken(code);
   if (!tokens.refresh_token) {
@@ -65,53 +108,47 @@ export async function connectGmail({ userId, code }) {
       'Google did not return a refresh token. Remove DeliverIQ from your Google account access and connect again.'
     );
   }
-
   client.setCredentials(tokens);
   const oauth2 = google.oauth2({ version: 'v2', auth: client });
   const { data } = await oauth2.userinfo.get();
+  return { email: data.email, refreshToken: tokens.refresh_token };
+}
 
-  // The send gap and daily cap are tracked per DeliverIQ user. If two users connected the
-  // same Gmail, each would get its own gap and cap and together they could overrun Gmail.
-  const clash = await prisma.user.findFirst({
-    where: { id: { not: userId }, gmailEmail: { equals: data.email, mode: 'insensitive' } },
-    select: { id: true },
+/**
+ * Unlink Gmail from this member in this workspace only. The address stays connected in any
+ * other workspace that uses it; when nothing uses it any more its token is removed.
+ */
+export async function disconnectGmail(userId, workspaceId) {
+  const member = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
   });
-  if (clash) {
-    throw new HttpError(409, 'That Gmail account is already connected to another DeliverIQ login. Use it from that login instead.');
+  if (!member?.gmailAccountId) {
+    return { ok: true };
   }
-
-  return prisma.user.update({
-    where: { id: userId },
-    data: {
-      gmailEmail: data.email,
-      gmailRefreshToken: encrypt(tokens.refresh_token),
-      gmailConnectedAt: new Date(),
-    },
-  });
+  const accountId = member.gmailAccountId;
+  await prisma.workspaceMember.update({ where: { id: member.id }, data: { gmailAccountId: null } });
+  const stillUsed = await prisma.workspaceMember.count({ where: { gmailAccountId: accountId } });
+  if (!stillUsed) {
+    await prisma.gmailAccount.update({ where: { id: accountId }, data: { refreshToken: null } });
+  }
+  return { ok: true };
 }
 
-export async function disconnectGmail(userId) {
-  return prisma.user.update({
-    where: { id: userId },
-    data: {
-      gmailEmail: null,
-      gmailRefreshToken: null,
-      gmailConnectedAt: null,
-    },
-  });
-}
-
-export async function gmailStatus(userId) {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { gmailEmail: true, gmailConnectedAt: true },
-  });
+/** Gmail status for this member in the active workspace. */
+export async function gmailStatus(userId, workspaceId) {
+  const member = workspaceId
+    ? await prisma.workspaceMember.findUnique({
+        where: { workspaceId_userId: { workspaceId, userId } },
+        include: { gmailAccount: { select: { email: true, connectedAt: true, refreshToken: true } } },
+      })
+    : null;
+  const account = member?.gmailAccount?.refreshToken ? member.gmailAccount : null;
 
   return {
     configured: googleConfigured(),
-    connected: Boolean(user?.gmailEmail),
-    email: user?.gmailEmail || null,
-    connectedAt: user?.gmailConnectedAt || null,
+    connected: Boolean(account),
+    email: account?.email || null,
+    connectedAt: account?.connectedAt || null,
     redirectUri: env.google.redirectUri,
     origin: env.appUrl,
     localRedirectUri: 'http://127.0.0.1:3000/auth/google/callback',
@@ -119,36 +156,32 @@ export async function gmailStatus(userId) {
 }
 
 /**
- * The Gmail sender for one user. workspaceId picks whose display name and reply to
- * address are used (the workspace being sent for); it defaults to the user's default one.
- * Without a user there is no sender: never borrow another account's Gmail.
+ * A Gmail address ready to send or read. workspaceId picks whose display name and reply to
+ * address are used (the workspace being sent for); userId whose name is the fallback.
+ * Without an account there is no sender: never borrow another address.
  */
-export async function getUserSender(userId, workspaceId) {
-  if (!userId) {
+export async function getAccountSender(accountId, { workspaceId, userId } = {}) {
+  if (!accountId) {
     return null;
   }
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    include: { workspace: { select: { fromDisplayName: true, replyToEmail: true } } },
-  });
-  if (user && workspaceId && workspaceId !== user.workspaceId) {
-    user.workspace = await prisma.workspace.findUnique({
-      where: { id: workspaceId },
-      select: { fromDisplayName: true, replyToEmail: true },
-    });
-  }
-
-  if (!user?.gmailRefreshToken) {
+  const account = await prisma.gmailAccount.findUnique({ where: { id: accountId } });
+  if (!account?.refreshToken) {
     return null;
   }
-
+  const [workspace, user] = await Promise.all([
+    workspaceId
+      ? prisma.workspace.findUnique({ where: { id: workspaceId }, select: { fromDisplayName: true, replyToEmail: true } })
+      : null,
+    userId ? prisma.user.findUnique({ where: { id: userId }, select: { name: true } }) : null,
+  ]);
   return {
-    userId: user.id,
-    email: user.gmailEmail,
-    refreshToken: decrypt(user.gmailRefreshToken),
-    fromDisplayName: user.workspace?.fromDisplayName,
-    userName: user.name,
-    replyToEmail: user.workspace?.replyToEmail,
+    accountId: account.id,
+    userId: userId || null,
+    email: account.email,
+    refreshToken: decrypt(account.refreshToken),
+    fromDisplayName: workspace?.fromDisplayName,
+    userName: user?.name,
+    replyToEmail: workspace?.replyToEmail,
   };
 }
 
@@ -174,15 +207,16 @@ function formatFrom(displayName, email) {
   return `"${displayName.replace(/["\\]/g, '')}" <${email}>`;
 }
 
+/** The Gmail a workspace sends from by default (an owner's link first), ready to use. */
 export async function getWorkspaceSender(workspaceId) {
   if (!workspaceId) {
     return null;
   }
   const member = await prisma.workspaceMember.findFirst({
-    where: { workspaceId, user: { gmailRefreshToken: { not: null } } },
+    where: { workspaceId, gmailAccount: { refreshToken: { not: null } } },
     orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
   });
-  return member ? getUserSender(member.userId, workspaceId) : null;
+  return member ? getAccountSender(member.gmailAccountId, { workspaceId, userId: member.userId }) : null;
 }
 
 /**
@@ -229,10 +263,11 @@ export async function sendViaGmail({
   inReplyTo,
   references,
   threadId,
+  accountId,
   userId,
   workspaceId,
 }) {
-  const sender = await getUserSender(userId, workspaceId);
+  const sender = await getAccountSender(accountId, { workspaceId, userId });
   if (!sender) {
     return null;
   }
@@ -418,8 +453,8 @@ async function listBounceMessageIds(gmail) {
   return ids.slice(0, 100);
 }
 
-export async function listGmailBounceAddresses() {
-  const sender = await getWorkspaceSender();
+export async function listGmailBounceAddresses(workspaceId) {
+  const sender = await getWorkspaceSender(workspaceId);
   if (!sender) {
     throw new HttpError(400, 'Connect Gmail in Settings first.');
   }
@@ -503,8 +538,8 @@ function plainTextOf(payload) {
  * Recent inbound messages (not from us, not bounce notices) for one connected account.
  * Returns { id, threadId, fromEmail, subject, body, headers, snippet, receivedAt }.
  */
-export async function listGmailInboundReplies(userId, { days = 14, max = 100 } = {}) {
-  const sender = await getUserSender(userId);
+export async function listGmailInboundReplies(accountId, { days = 14, max = 100 } = {}) {
+  const sender = await getAccountSender(accountId);
   if (!sender) return [];
 
   const client = createOAuthClient();
@@ -595,8 +630,8 @@ export function isReplyCandidate(message, senderEmail = '') {
  * Fetches at most `max` messages, only the fields we need.
  * Returns { messages, historyId, truncated }.
  */
-export async function fetchInboxDelta(userId, { historyId = null, after = null, max = 25 } = {}) {
-  const sender = await getUserSender(userId);
+export async function fetchInboxDelta(accountId, { historyId = null, after = null, max = 25 } = {}) {
+  const sender = await getAccountSender(accountId);
   if (!sender) return { messages: [], historyId, truncated: false };
   const client = createOAuthClient();
   client.setCredentials({ refresh_token: sender.refreshToken });

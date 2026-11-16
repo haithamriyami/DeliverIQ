@@ -56,6 +56,7 @@ export async function sendCampaignEmail({
   recipientId,
   stepId,
   unsubscribeUrl,
+  accountId,
   userId,
   campaignName,
   workspaceId,
@@ -140,6 +141,7 @@ export async function sendCampaignEmail({
     subject: renderedSubject,
     html: renderedHtml,
     unsubscribeUrl,
+    accountId,
     userId,
     ...threadingInfo,
   });

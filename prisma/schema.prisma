@@ -71,11 +71,13 @@ model User {
   workspaceId  String   @map("workspace_id")
   createdAt    DateTime @default(now()) @map("created_at")
 
+  // Old per user Gmail columns. No longer read or written: Gmail is per workspace in
+  // gmail_accounts and workspace_members.gmail_account_id. Kept so a rollback still works.
   gmailEmail        String?   @map("gmail_email")
   gmailRefreshToken String?   @map("gmail_refresh_token")
   gmailConnectedAt  DateTime? @map("gmail_connected_at")
 
-  // Per sender throttle state. nextSendAt is claimed atomically before every send.
+  // Old per sender throttle state (see above, no longer used). nextSendAt is claimed atomically before every send.
   nextSendAt           DateTime? @map("next_send_at")
   lastSentAt           DateTime? @map("last_sent_at")
   sendingPausedAt      DateTime? @map("sending_paused_at")
@@ -99,6 +101,37 @@ model User {
   @@map("users")
 }
 
+/// One connected Gmail address. Workspace members link to it to send from it. The send gap,
+/// daily count, pauses and inbox sync live here, so they stay shared by every workspace
+/// that uses the same Gmail address.
+model GmailAccount {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  refreshToken  String?   @map("refresh_token")
+  connectedAt   DateTime? @map("connected_at")
+  // Who first connected it. Only used to count sends recorded before sender_account_id existed.
+  connectedById String?   @map("connected_by_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  nextSendAt          DateTime? @map("next_send_at")
+  lastSentAt          DateTime? @map("last_sent_at")
+  sendingPausedAt     DateTime? @map("sending_paused_at")
+  sendingPausedReason String    @default("") @map("sending_paused_reason")
+  sendBackoffCount    Int       @default(0) @map("send_backoff_count")
+  lastInboxSyncAt     DateTime? @map("last_inbox_sync_at")
+  gmailHistoryId      String?   @map("gmail_history_id")
+  inboxSyncNotBefore  DateTime? @map("inbox_sync_not_before")
+  inboxSyncLeaseUntil DateTime? @map("inbox_sync_lease_until")
+  inboxSyncErrors     Int       @default(0) @map("inbox_sync_errors")
+  inboxSyncNotice     String    @default("") @map("inbox_sync_notice")
+
+  members WorkspaceMember[]
+  sends   CampaignRecipient[]
+  replies InboundReply[]
+
+  @@map("gmail_accounts")
+}
+
 /// A user can belong to many workspaces, with a role in each.
 model WorkspaceMember {
   id          String   @id @default(uuid())
@@ -106,11 +139,15 @@ model WorkspaceMember {
   userId      String   @map("user_id")
   role        UserRole @default(member)
   createdAt   DateTime @default(now()) @map("created_at")
+  // The Gmail this member sends from in this workspace. Each workspace has its own.
+  gmailAccountId String? @map("gmail_account_id")
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gmailAccount GmailAccount? @relation(fields: [gmailAccountId], references: [id], onDelete: SetNull)
 
   @@unique([workspaceId, userId])
+  @@index([gmailAccountId])
   @@index([userId])
   @@map("workspace_members")
 }
@@ -247,8 +284,11 @@ model CampaignRecipient {
   messageId   String?                  @map("message_id")
   threadId    String?                  @map("thread_id")
   senderId    String?                  @map("sender_id")
+  // The Gmail address it went out from. The daily cap counts these.
+  senderAccountId String?              @map("sender_account_id")
 
-  sender    User?        @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  sender        User?         @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  senderAccount GmailAccount? @relation(fields: [senderAccountId], references: [id], onDelete: SetNull)
   campaign  Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   step      CampaignStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
   recipient Recipient    @relation(fields: [recipientId], references: [id], onDelete: Cascade)
@@ -257,6 +297,7 @@ model CampaignRecipient {
   @@index([campaignId, status])
   @@index([stepId, status])
   @@index([senderId, sentAt])
+  @@index([senderAccountId, sentAt])
   @@map("campaign_recipients")
 }
 
@@ -272,6 +313,7 @@ model InboundReply {
   threadId       String?          @map("thread_id")
   type           InboundReplyType
   senderId       String?          @map("sender_id")
+  senderAccountId String?         @map("sender_account_id")
   recipientId    String           @map("recipient_id")
   campaignId     String?          @map("campaign_id")
   subject        String           @default("")
@@ -279,9 +321,10 @@ model InboundReply {
   receivedAt     DateTime         @default(now()) @map("received_at")
   createdAt      DateTime         @default(now()) @map("created_at")
 
-  sender    User?     @relation(fields: [senderId], references: [id], onDelete: SetNull)
-  recipient Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
-  campaign  Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  sender        User?         @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  senderAccount GmailAccount? @relation(fields: [senderAccountId], references: [id], onDelete: SetNull)
+  recipient     Recipient     @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  campaign      Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
   @@index([campaignId, type])
   @@index([recipientId])

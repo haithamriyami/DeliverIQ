@@ -7,7 +7,7 @@ import { campaignAssignmentsForRecipients } from './recipientService.js';
 import {
   runSendTick,
   checkCampaignBounceRate,
-  resolveSenderUser,
+  resolveSender,
   claimSendSlot,
   workspaceSendSettings,
   sentTodayCount,
@@ -24,10 +24,10 @@ function inWorkspace(workspaceId) {
   return workspaceId ? { workspaceId } : {};
 }
 
-/** Workspaces a sender (connected Gmail user) is a member of. */
-export async function senderWorkspaceIds(senderId) {
-  const rows = await prisma.workspaceMember.findMany({ where: { userId: senderId }, select: { workspaceId: true } });
-  return rows.map((row) => row.workspaceId);
+/** Workspaces that send from this Gmail account (gmail_accounts id). */
+export async function senderWorkspaceIds(accountId) {
+  const rows = await prisma.workspaceMember.findMany({ where: { gmailAccountId: accountId }, select: { workspaceId: true } });
+  return [...new Set(rows.map((row) => row.workspaceId))];
 }
 
 function isSendable(recipient, step) {
@@ -564,7 +564,7 @@ const STATUS_RANK = {
   bounced: 4,
 };
 
-export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId, senderId }) {
+export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId, senderId, senderAccountId }) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: { orderBy: { stepNumber: 'asc' } } },
@@ -593,6 +593,7 @@ export async function recordSend({ campaignId, recipientId, stepId, messageId, t
         messageId: messageId || null,
         threadId: threadId || null,
         senderId: senderId || null,
+        senderAccountId: senderAccountId || null,
       },
     });
   }
@@ -608,11 +609,12 @@ export async function recordSend({ campaignId, recipientId, stepId, messageId, t
       messageId: messageId || existing.messageId,
       threadId: threadId || existing.threadId,
       senderId: senderId || existing.senderId,
+      senderAccountId: senderAccountId || existing.senderAccountId,
     },
   });
 }
 
-export async function recordBounce({ campaignId, recipientId, error, stepId, senderId }) {
+export async function recordBounce({ campaignId, recipientId, error, stepId, senderId, senderAccountId }) {
   const reason = String(error || 'Bounced').slice(0, 500);
 
   await prisma.recipient.update({
@@ -647,6 +649,7 @@ export async function recordBounce({ campaignId, recipientId, error, stepId, sen
           error: reason,
           sentAt: new Date(),
           senderId: senderId || null,
+          senderAccountId: senderAccountId || null,
         },
       });
     }
@@ -738,12 +741,13 @@ export async function syncBouncesFromGmail({ force = false, workspaceId } = {}) 
 
 /**
  * Mark contacts from Gmail bounce notices as bounced. Idempotent.
- * With a sender, only contacts in workspaces that Gmail account sends for are touched, so a
- * bounce in one workspace never changes a contact with the same email in another.
+ * With a sender (gmail_accounts row), only contacts in workspaces that send from this Gmail
+ * are touched, so a bounce in one workspace never changes a contact with the same email in
+ * another workspace that uses a different Gmail.
  */
 export async function applyBounceNotices(notices, sender) {
   if (notices.length === 0) {
-    return { scanned: 0, marked: 0, emails: [] };
+    return { scanned: 0, marked: 0, emails: [], marks: [] };
   }
 
   const byEmail = new Map(notices.map((row) => [row.email, row.reason]));
@@ -752,10 +756,17 @@ export async function applyBounceNotices(notices, sender) {
     where: {
       email: { in: [...byEmail.keys()] },
       ...(workspaceIds ? { workspaceId: { in: workspaceIds } } : {}),
+      // Only people this Gmail actually emailed (or old rows from before senders were recorded).
+      ...(sender?.id
+        ? { campaignRecipients: { some: { OR: [{ senderAccountId: sender.id }, { senderAccountId: null }] } } }
+        : {}),
     },
   });
 
   const emails = [];
+  // Which workspace each marked contact is in, so a sync started from one workspace only
+  // reports that workspace's contacts.
+  const marks = [];
   const touchedCampaigns = new Set();
   for (const recipient of recipients) {
     const reason =
@@ -776,7 +787,7 @@ export async function applyBounceNotices(notices, sender) {
       where: {
         recipientId: recipient.id,
         status: 'sent',
-        ...(sender?.id ? { OR: [{ senderId: sender.id }, { senderId: null }] } : {}),
+        ...(sender?.id ? { OR: [{ senderAccountId: sender.id }, { senderAccountId: null }] } : {}),
       },
       orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
     });
@@ -791,6 +802,7 @@ export async function applyBounceNotices(notices, sender) {
     }
 
     emails.push(recipient.email);
+    marks.push({ email: recipient.email, workspaceId: recipient.workspaceId });
     if (latestSent) touchedCampaigns.add(latestSent.campaignId);
   }
 
@@ -798,7 +810,7 @@ export async function applyBounceNotices(notices, sender) {
     await checkCampaignBounceRate(campaignId);
   }
 
-  return { scanned: notices.length, marked: emails.length, emails };
+  return { scanned: notices.length, marked: emails.length, emails, marks };
 }
 
 export async function applyEngagementEvent({ campaignId, recipientId, event, stepId }) {
@@ -1169,13 +1181,13 @@ export async function sendTestEmail({ campaignId, to, workspaceId }) {
   const template = step.template || campaign.template;
 
   // Test sends use the same Gmail account, so they respect the same gap and daily cap.
-  const sender = await resolveSenderUser(campaign.createdById, campaign.workspaceId);
+  const sender = await resolveSender(campaign.createdById, campaign.workspaceId);
   if (sender) {
     const settings = await workspaceSendSettings(campaign.workspaceId);
     const decision = sendDecision({
       now: new Date(),
       nextSendAt: sender.nextSendAt,
-      sentToday: await sentTodayCount(sender.id),
+      sentToday: await sentTodayCount(sender),
       settings,
       pausedAt: sender.sendingPausedAt,
     });
@@ -1198,7 +1210,8 @@ export async function sendTestEmail({ campaignId, to, workspaceId }) {
     recipientId: 'test',
     stepId: step.id,
     unsubscribeUrl: `${env.appUrl}/unsubscribe.html`,
-    userId: sender?.id,
+    accountId: sender?.id,
+    userId: sender?.userId,
     campaignName: campaign.name,
     workspaceId: campaign.workspaceId,
   });
@@ -1218,12 +1231,16 @@ export async function syncRepliesFromGmail({ force = false, workspaceId } = {}) 
 
 /** Store and act on inbound replies for one sender. Idempotent (dedupe by Gmail message id). */
 export async function applyInboundReplies(sender, messages, { classify = classifyReply } = {}) {
-  const summary = { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0 };
+  const summary = { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0, byWorkspace: {} };
+  const tally = (workspaceId, key) => {
+    const row = (summary.byWorkspace[workspaceId] ||= { replies: 0, autoReplies: 0, optOuts: 0 });
+    row[key] += 1;
+  };
   // Only sends from this Gmail account (or old rows from before senders were recorded, in
   // workspaces it sends for) can be what a reply in its inbox answers.
   const workspaceIds = await senderWorkspaceIds(sender.id);
   const fromThisSender = {
-    OR: [{ senderId: sender.id }, { senderId: null, campaign: { workspaceId: { in: workspaceIds } } }],
+    OR: [{ senderAccountId: sender.id }, { senderAccountId: null, campaign: { workspaceId: { in: workspaceIds } } }],
   };
   {
     for (const message of messages) {
@@ -1255,7 +1272,8 @@ export async function applyInboundReplies(sender, messages, { classify = classif
           gmailMessageId: message.id,
           threadId: message.threadId || null,
           type,
-          senderId: sender.id,
+          senderId: send.senderId || null,
+          senderAccountId: sender.id,
           recipientId: send.recipientId,
           campaignId: send.campaignId,
           subject: String(message.subject || '').slice(0, 300),
@@ -1266,12 +1284,14 @@ export async function applyInboundReplies(sender, messages, { classify = classif
 
       if (type === 'auto_reply') {
         summary.autoReplies += 1;
+        tally(send.recipient.workspaceId, 'autoReplies');
         continue;
       }
 
       const data = { repliedAt: send.recipient.repliedAt || message.receivedAt || new Date() };
       if (type === 'opt_out') {
         summary.optOuts += 1;
+        tally(send.recipient.workspaceId, 'optOuts');
         Object.assign(data, {
           doNotContact: true,
           status: send.recipient.status === 'bounced' ? 'bounced' : 'unsubscribed',
@@ -1279,6 +1299,7 @@ export async function applyInboundReplies(sender, messages, { classify = classif
         });
       } else {
         summary.replies += 1;
+        tally(send.recipient.workspaceId, 'replies');
       }
       await prisma.recipient.update({ where: { id: send.recipientId }, data });
     }

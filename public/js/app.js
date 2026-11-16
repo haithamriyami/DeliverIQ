@@ -12,6 +12,7 @@ const pageMap = {
 const charts = {};
 let currentUser = null;
 let inviteToken = null;
+let inviteHasAccount = false;
 let setupRequired = true;
 let recipientFilter = '';
 let recipientSearch = '';
@@ -677,18 +678,18 @@ async function loadSettings() {
   const gmailEl = document.getElementById('gmail-status');
   const actions = document.getElementById('gmail-actions');
   if (google.connected) {
-    gmailEl.innerHTML = `<span class="sendgrid-pill live">Gmail connected · ${google.email}</span>`;
+    gmailEl.innerHTML = `<span class="sendgrid-pill live">Gmail for this workspace · ${escapeHtml(google.email)}</span>`;
     actions.innerHTML = `
       <a class="btn btn-primary" href="/auth/google">Reconnect Gmail</a>
       <button class="btn btn-ghost" id="sync-gmail-bounces" type="button">Check bounce inbox</button>
       <button class="btn btn-ghost" id="gmail-disconnect" type="button">Disconnect Gmail</button>
-      <p class="muted">Your Gmail account is connected. You can send campaigns and they will be sent from ${google.email}. Reconnect to refresh permissions, then check bounce inbox after a send.</p>
+      <p class="muted">Campaigns in this workspace are sent from ${escapeHtml(google.email)}. Other workspaces keep their own Gmail. Reconnect to refresh permissions or to use a different Gmail here.</p>
     `;
   } else if (google.configured) {
-    gmailEl.innerHTML = '<span class="sendgrid-pill dry">Gmail ready - connect your Google account</span>';
+    gmailEl.innerHTML = '<span class="sendgrid-pill dry">No Gmail connected in this workspace</span>';
     actions.innerHTML = `
       <a class="btn btn-primary" href="/auth/google">Connect Gmail</a>
-      <p class="muted">Each team member can connect their own Gmail account. Campaigns you create will be sent from your connected Gmail address.</p>
+      <p class="muted">Each workspace has its own Gmail. Connect the address this workspace should send from. Your other workspaces are not changed.</p>
       ${googleRedirectHelp(google)}
     `;
   } else {
@@ -787,6 +788,18 @@ function fmtTime(value) {
   });
 }
 
+/**
+ * Sent today in this workspace. If the same Gmail is also used by another workspace, the
+ * daily limit is shared, so the total for the address is shown too (a number only).
+ */
+function sentTodayLabel(sender) {
+  const here = sender.sentTodayHere ?? sender.sentToday;
+  const shared = sender.sharedWithOtherWorkspaces
+    ? ` (${fmtNum(sender.sentToday)} in total from this Gmail, which another workspace also uses)`
+    : '';
+  return `${fmtNum(here)} of ${fmtNum(sender.dailyCap)} sent today${shared}`;
+}
+
 async function loadSendingStatus() {
   if (!currentUser) return null;
   let status;
@@ -802,7 +815,7 @@ async function loadSendingStatus() {
   for (const sender of status.senders || []) {
     if (sender.paused) {
       rows.push(`<div class="banner-row"><div><strong>Sending paused for ${escapeHtml(sender.email)}</strong>${escapeHtml(sender.pausedReason || '')}</div>
-        <button class="btn btn-primary btn-small" data-resume-sender="${sender.userId}">Resume</button></div>`);
+        <button class="btn btn-primary btn-small" data-resume-sender="${sender.accountId}">Resume</button></div>`);
     }
   }
   if (status.globalPause) {
@@ -827,7 +840,7 @@ async function loadSendingStatus() {
   }
   if (meter) {
     const parts = (status.senders || []).map((sender) => {
-      const base = `${escapeHtml(sender.email)}: ${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today, ${fmtNum(sender.queued)} queued`;
+      const base = `${escapeHtml(sender.email)}: ${sentTodayLabel(sender)}, ${fmtNum(sender.queued)} queued`;
       if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time${sender.estimatedFinish ? `, all done about ${fmtTime(sender.estimatedFinish)}` : ''}`;
       if (sender.queued && sender.estimatedFinish && !sender.paused && !status.globalPause) {
         return `${base}. About ${fmtNum(sender.emailsPerHour)} per hour, estimated finish ${fmtTime(sender.estimatedFinish)} Nairobi time`;
@@ -841,9 +854,9 @@ async function loadSendingStatus() {
   if (accounts) {
     accounts.innerHTML = (status.senders || []).length
       ? status.senders
-          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${fmtNum(sender.sentToday)} of ${fmtNum(sender.dailyCap)} sent today · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}</span></div>`)
+          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${sentTodayLabel(sender)} · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}</span></div>`)
           .join('')
-      : '<p class="muted">No Gmail account connected yet.</p>';
+      : '<p class="muted">No Gmail connected in this workspace yet.</p>';
   }
   scheduleTicks(status);
   return status;
@@ -963,7 +976,7 @@ document.addEventListener('click', async (event) => {
     }
     if (resumeSender) {
       if (!confirm('Resume sending from this Gmail account? Only do this after checking the account is in good standing.')) return;
-      await api('/sending/resume', { method: 'POST', body: JSON.stringify({ userId: resumeSender.dataset.resumeSender }) });
+      await api('/sending/resume', { method: 'POST', body: JSON.stringify({ accountId: resumeSender.dataset.resumeSender }) });
       showToast('Sending resumed');
       await loadSendingStatus();
     }
@@ -1212,7 +1225,7 @@ document.getElementById('auth-form').addEventListener('submit', async (event) =>
         method: 'POST',
         body: JSON.stringify({
           token: inviteToken,
-          name: document.getElementById('auth-name').value.trim(),
+          ...(inviteHasAccount ? {} : { name: document.getElementById('auth-name').value.trim() }),
           password,
         }),
       });
@@ -1562,7 +1575,9 @@ document.getElementById('invite-form').addEventListener('submit', async (event) 
       method: 'POST',
       body: JSON.stringify({ email: event.currentTarget.email.value.trim() }),
     });
-    document.getElementById('invite-result').innerHTML = `<div class="invite-url">Invite link: ${invite.inviteUrl}</div>`;
+    document.getElementById('invite-result').innerHTML = `<div class="invite-url">Invite link: ${invite.inviteUrl}</div>${
+      invite.existingAccount ? '<p class="muted">This person already has a DeliverIQ account. They open the link and enter their password to add this workspace.</p>' : ''
+    }`;
     showToast('Invite created. Send this link to your partner');
     event.currentTarget.reset();
     await loadSettings();
@@ -1632,7 +1647,15 @@ async function boot() {
       const preview = await api(`/auth/invites/preview?token=${encodeURIComponent(inviteToken)}`);
       setAuthMode('invite', { email: preview.email, workspace: preview.workspaceName });
       document.getElementById('auth-email').readOnly = true;
-      document.getElementById('auth-lede').textContent = `Join ${preview.workspaceName} as ${preview.email}`;
+      inviteHasAccount = Boolean(preview.existingAccount);
+      if (inviteHasAccount) {
+        // Existing account: confirm with the current password, no name needed.
+        document.getElementById('auth-name-field').hidden = true;
+        document.getElementById('auth-name').required = false;
+        document.getElementById('auth-lede').textContent = `Join ${preview.workspaceName} as ${preview.email}. Enter your DeliverIQ password. Your own workspaces stay as they are.`;
+      } else {
+        document.getElementById('auth-lede').textContent = `Join ${preview.workspaceName} as ${preview.email}`;
+      }
       lockApp();
       return;
     } catch (err) {

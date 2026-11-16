@@ -1,13 +1,14 @@
 import jwt from 'jsonwebtoken';
 import { asyncHandler } from '../middleware/asyncHandler.js';
-import { requireAuth, requireOwner } from '../middleware/auth.js';
+import { requireAuth } from '../middleware/auth.js';
 import { env } from '../config/env.js';
 import { HttpError } from '../middleware/errorHandler.js';
 import * as gmailService from '../services/gmailService.js';
 
+/** Signed so the callback knows who connected and for which workspace. */
 function signGoogleState(user) {
   return jwt.sign(
-    { userId: user.id },
+    { userId: user.id, workspaceId: user.workspaceId, purpose: 'gmail_connect' },
     env.sessionSecret,
     { expiresIn: '10m' }
   );
@@ -53,8 +54,14 @@ export const callback = asyncHandler(async (req, res) => {
     throw new HttpError(400, 'Google sign-in expired. Try Connect Gmail again.');
   }
 
+  if (payload.purpose !== 'gmail_connect' || !payload.workspaceId) {
+    throw new HttpError(400, 'Google sign-in expired. Try Connect Gmail again.');
+  }
+
+  // Connects Gmail for the workspace that was active when Connect Gmail was pressed.
   await gmailService.connectGmail({
     userId: payload.userId,
+    workspaceId: payload.workspaceId,
     code: String(code),
   });
 
@@ -64,7 +71,7 @@ export const callback = asyncHandler(async (req, res) => {
 export const disconnect = [
   requireAuth,
   asyncHandler(async (req, res) => {
-    await gmailService.disconnectGmail(req.user.id);
+    await gmailService.disconnectGmail(req.user.id, req.user.workspaceId);
     res.json({ ok: true });
   }),
 ];

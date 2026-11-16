@@ -55,12 +55,18 @@ export function kickBackgroundSender() {
 }
 
 /** Called by the open app every few seconds. Never waits for the gap itself. */
-export const tick = asyncHandler(async (_req, res) => {
+export const tick = asyncHandler(async (req, res) => {
   if (kickBackgroundSender()) {
     return res.json({ ok: true, background: true });
   }
   const result = await campaignService.runSchedulerTick({ budgetMs: 0 });
-  res.json({ ok: true, sent: result.results.filter((row) => row.sent).length });
+  // Only report sends of this workspace's campaigns.
+  const sentIds = [...new Set(result.results.filter((row) => row.sent).map((row) => row.campaignId))];
+  const mine = sentIds.length
+    ? await prisma.campaign.findMany({ where: { id: { in: sentIds }, workspaceId: req.user.workspaceId }, select: { id: true } })
+    : [];
+  const ids = new Set(mine.map((row) => row.id));
+  res.json({ ok: true, sent: result.results.filter((row) => row.sent && ids.has(row.campaignId)).length });
 });
 
 export const status = asyncHandler(async (req, res) => {
@@ -68,25 +74,27 @@ export const status = asyncHandler(async (req, res) => {
 });
 
 const resumeSenderSchema = z.object({
-  body: z.object({ userId: z.string().uuid() }),
+  body: z.object({ accountId: z.string().uuid() }),
   params: z.any().optional(),
   query: z.any().optional(),
 });
 
+/** Resume a paused Gmail address. Only one linked in this workspace. */
 export const resumeSender = [
   validate(resumeSenderSchema),
   asyncHandler(async (req, res) => {
-    const { userId } = req.validated.body;
-    if (req.user.role !== 'owner' && req.user.id !== userId) {
-      throw new HttpError(403, 'Only the owner or the account holder can resume this sender');
-    }
-    const member = await prisma.workspaceMember.findUnique({
-      where: { workspaceId_userId: { workspaceId: req.user.workspaceId, userId } },
+    const { accountId } = req.validated.body;
+    const links = await prisma.workspaceMember.findMany({
+      where: { workspaceId: req.user.workspaceId, gmailAccountId: accountId },
+      select: { userId: true },
     });
-    if (!member) {
+    if (!links.length) {
       throw new HttpError(404, 'Sender not found in this workspace');
     }
-    await scheduler.resumeSender(userId);
+    if (req.user.role !== 'owner' && !links.some((link) => link.userId === req.user.id)) {
+      throw new HttpError(403, 'Only the owner or the account holder can resume this sender');
+    }
+    await scheduler.resumeSender(accountId);
     res.json({ ok: true });
   }),
 ];
