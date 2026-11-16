@@ -99,8 +99,9 @@ test(
         workspaceId: ws.id,
       },
     });
-    const agencies = await prisma.contactList.create({ data: { name: 'Agencies' } });
-    await prisma.contactList.create({ data: { name: 'Beauty salons' } });
+    await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+    const agencies = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'Agencies' } });
+    await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'Beauty salons' } });
 
     const app = createApp();
     const server = http.createServer(app);

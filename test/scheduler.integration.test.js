@@ -24,13 +24,15 @@ test('scheduler: gap, daily cap, follow-up skip for replied contacts', { skip: !
   const user = await prisma.user.create({
     data: { email: 'o@test.dev', name: 'Haitham Soud', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'o@gmail.com', gmailRefreshToken: 'enc' },
   });
-  const list = await prisma.contactList.create({ data: { name: 'L' } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi {{name}}</p>' } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi {{name}}</p>' } });
   const people = [];
   for (let i = 0; i < 5; i += 1) {
-    people.push(await prisma.recipient.create({ data: { email: `p${i}@x.dev`, name: `P${i}`, listId: list.id } }));
+    people.push(await prisma.recipient.create({ data: { workspaceId: ws.id, email: `p${i}@x.dev`, name: `P${i}`, listId: list.id } }));
   }
   const campaign = await campaignService.createCampaign({
+    workspaceId: ws.id,
     name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: people.map((p) => p.id), listId: list.id, createdById: user.id,
   });
   await prisma.campaignStep.updateMany({ where: { campaignId: campaign.id }, data: { status: 'sending' } });

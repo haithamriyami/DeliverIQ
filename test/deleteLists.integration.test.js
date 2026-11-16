@@ -18,13 +18,14 @@ test('deleting lists keeps campaign contacts and suppression records', { skip: !
   }
   const ws = await prisma.workspace.create({ data: { name: 'W' } });
   const user = await prisma.user.create({ data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi</p>' } });
-  const mkList = (name) => prisma.contactList.create({ data: { name } });
-  const mk = (email, listId, extra = {}) => prisma.recipient.create({ data: { email, name: 'P', listId, ...extra } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
+  const mkList = (name) => prisma.contactList.create({ data: { workspaceId: ws.id, name } });
+  const mk = (email, listId, extra = {}) => prisma.recipient.create({ data: { workspaceId: ws.id, email, name: 'P', listId, ...extra } });
 
   // Empty list: deleted straight away.
   const empty = await mkList('Hospitality');
-  const r0 = await rs.deleteContactList(empty.id);
+  const r0 = await rs.deleteContactList(ws.id, empty.id);
   assert.equal(r0.deleted, true);
   assert.equal(await prisma.contactList.count({ where: { id: empty.id } }), 0);
 
@@ -32,7 +33,7 @@ test('deleting lists keeps campaign contacts and suppression records', { skip: !
   const keepList = await mkList('Retails');
   await mk('a@x.dev', keepList.id);
   await mk('b@x.dev', keepList.id);
-  const r1 = await rs.deleteContactList(keepList.id, { mode: 'list' });
+  const r1 = await rs.deleteContactList(ws.id, keepList.id, { mode: 'list' });
   assert.equal(r1.contactsMoved, 2);
   assert.equal(r1.contactsDeleted, 0);
   const unassigned = await prisma.contactList.findFirst({ where: { name: 'Unassigned' } });
@@ -46,16 +47,16 @@ test('deleting lists keeps campaign contacts and suppression records', { skip: !
   const bounced = await mk('bounced@x.dev', big.id, { status: 'bounced' });
   const unsub = await mk('unsub@x.dev', big.id, { status: 'unsubscribed' });
   const dnc = await mk('dnc@x.dev', big.id, { doNotContact: true });
-  const campaign = await cs.createCampaign({ name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: [queued.id], listId: big.id, createdById: user.id });
+  const campaign = await cs.createCampaign({ workspaceId: ws.id, name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: [queued.id], listId: big.id, createdById: user.id });
   await prisma.campaignStep.updateMany({ where: { campaignId: campaign.id }, data: { status: 'sending' } });
 
-  const preview = await rs.previewListDeletion(big.id);
+  const preview = await rs.previewListDeletion(ws.id, big.id);
   assert.deepEqual(
     { total: preview.total, inActiveCampaigns: preview.inActiveCampaigns, suppressed: preview.suppressed, deletable: preview.deletable },
     { total: 5, inActiveCampaigns: 1, suppressed: 3, deletable: 1 }
   );
 
-  const r2 = await rs.deleteContactList(big.id, { mode: 'contacts' });
+  const r2 = await rs.deleteContactList(ws.id, big.id, { mode: 'contacts' });
   assert.equal(r2.contactsDeleted, 1);
   assert.equal(r2.contactsMoved, 4);
   assert.equal(await prisma.recipient.count({ where: { id: plain.id } }), 0);
@@ -73,19 +74,19 @@ test('deleting lists keeps campaign contacts and suppression records', { skip: !
   assert.equal(after.listId, null);
 
   // Unassigned with protected contacts cannot be removed.
-  await assert.rejects(() => rs.deleteContactList(unassigned.id, { mode: 'contacts' }), /cannot be removed/);
+  await assert.rejects(() => rs.deleteContactList(ws.id, unassigned.id, { mode: 'contacts' }), /cannot be removed/);
 
   // Bulk: only empty lists go, never the last list.
   await mkList('E-commerce');
   await mkList('real estate');
   const withPeople = await mkList('Agencies');
   await mk('ag@x.dev', withPeople.id);
-  const bulk = await rs.deleteEmptyLists();
+  const bulk = await rs.deleteEmptyLists(ws.id);
   assert.equal(bulk.deleted, 2);
   assert.ok(await prisma.contactList.findUnique({ where: { id: withPeople.id } }));
   await prisma.recipient.deleteMany({});
   await prisma.campaign.deleteMany({});
-  const last = await rs.deleteEmptyLists();
+  const last = await rs.deleteEmptyLists(ws.id);
   assert.equal(await prisma.contactList.count(), 1, 'last list kept');
   assert.ok(last.deleted >= 1);
 

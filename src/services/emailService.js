@@ -58,6 +58,7 @@ export async function sendCampaignEmail({
   unsubscribeUrl,
   userId,
   campaignName,
+  workspaceId,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to });
   const renderedHtml = renderEmailHtml({
@@ -128,7 +129,13 @@ export async function sendCampaignEmail({
   }
 
   // Display name comes from Settings or the connected user's name (see resolveDisplayName).
+  // The workspace being sent for decides the From name and reply to address.
+  if (!workspaceId && campaignId) {
+    const owner = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { workspaceId: true } });
+    workspaceId = owner?.workspaceId;
+  }
   const gmailResult = await sendViaGmail({
+    workspaceId,
     to,
     subject: renderedSubject,
     html: renderedHtml,

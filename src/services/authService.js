@@ -11,6 +11,10 @@ export async function setupStatus() {
   return { setupRequired: userCount === 0 };
 }
 
+/**
+ * Sign up. Every new account gets its own workspace and owns it. Joining someone else's
+ * workspace only happens through an invite.
+ */
 export async function registerOwner({ name, email, password, workspaceName }) {
   const emailNormalized = email.toLowerCase();
   const already = await prisma.user.findUnique({ where: { email: emailNormalized } });
@@ -19,34 +23,13 @@ export async function registerOwner({ name, email, password, workspaceName }) {
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-  const existingCount = await prisma.user.count();
-
-  if (existingCount > 0) {
-    const workspace = await prisma.workspace.findFirst({
-      orderBy: { createdAt: 'asc' },
-    });
-    if (!workspace) {
-      throw new HttpError(500, 'Workspace is missing. Try again.');
-    }
-
-    return prisma.user.create({
-      data: {
-        name,
-        email: emailNormalized,
-        passwordHash,
-        role: 'member',
-        workspaceId: workspace.id,
-      },
-      include: { workspace: true },
-    });
-  }
 
   return prisma.$transaction(async (tx) => {
     const workspace = await tx.workspace.create({
-      data: { name: workspaceName || 'DeliverIQ' },
+      data: { name: String(workspaceName || '').trim() || `${name}'s workspace` },
     });
 
-    return tx.user.create({
+    const user = await tx.user.create({
       data: {
         name,
         email: emailNormalized,
@@ -56,7 +39,64 @@ export async function registerOwner({ name, email, password, workspaceName }) {
       },
       include: { workspace: true },
     });
+    await tx.workspaceMember.create({
+      data: { workspaceId: workspace.id, userId: user.id, role: 'owner' },
+    });
+    return user;
   });
+}
+
+/** Workspaces this user belongs to, with their role in each. */
+export async function listWorkspacesForUser(userId) {
+  const rows = await prisma.workspaceMember.findMany({
+    where: { userId },
+    include: { workspace: { select: { id: true, name: true, createdAt: true } } },
+    orderBy: { createdAt: 'asc' },
+  });
+  return rows.map((row) => ({
+    id: row.workspace.id,
+    name: row.workspace.name,
+    role: row.role,
+    createdAt: row.workspace.createdAt,
+  }));
+}
+
+/** Create a new, empty workspace. The creator owns it. */
+export async function createWorkspace(userId, name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    throw new HttpError(400, 'Workspace name is required');
+  }
+  const mine = await listWorkspacesForUser(userId);
+  if (mine.some((ws) => ws.name.toLowerCase() === trimmed.toLowerCase())) {
+    throw new HttpError(409, `You already have a workspace named ${trimmed}`);
+  }
+  return prisma.$transaction(async (tx) => {
+    const workspace = await tx.workspace.create({ data: { name: trimmed } });
+    await tx.workspaceMember.create({ data: { workspaceId: workspace.id, userId, role: 'owner' } });
+    return workspace;
+  });
+}
+
+/** Check membership before switching. Also remembers it as the user's default workspace. */
+export async function switchWorkspace(userId, workspaceId) {
+  const membership = await prisma.workspaceMember.findUnique({
+    where: { workspaceId_userId: { workspaceId, userId } },
+    include: { workspace: true },
+  });
+  if (!membership) {
+    throw new HttpError(404, 'Workspace not found');
+  }
+  await prisma.user.update({ where: { id: userId }, data: { workspaceId } });
+  return membership;
+}
+
+export async function renameWorkspace(workspaceId, name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) {
+    throw new HttpError(400, 'Workspace name is required');
+  }
+  return prisma.workspace.update({ where: { id: workspaceId }, data: { name: trimmed } });
 }
 
 export async function login({ email, password }) {
@@ -162,6 +202,10 @@ export async function acceptInvite({ token, name, password }) {
       include: { workspace: true },
     });
 
+    await tx.workspaceMember.create({
+      data: { workspaceId: invite.workspaceId, userId: created.id, role: invite.role },
+    });
+
     await tx.invite.update({
       where: { id: invite.id },
       data: { acceptedAt: new Date() },
@@ -174,17 +218,11 @@ export async function acceptInvite({ token, name, password }) {
 }
 
 export async function listTeam(workspaceId) {
-  const [users, invites] = await Promise.all([
-    prisma.user.findMany({
+  const [members, invites] = await Promise.all([
+    prisma.workspaceMember.findMany({
       where: { workspaceId },
       orderBy: { createdAt: 'asc' },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-      },
+      include: { user: { select: { id: true, name: true, email: true, createdAt: true } } },
     }),
     prisma.invite.findMany({
       where: { workspaceId, acceptedAt: null, expiresAt: { gt: new Date() } },
@@ -192,5 +230,12 @@ export async function listTeam(workspaceId) {
     }),
   ]);
 
+  const users = members.map((row) => ({
+    id: row.user.id,
+    name: row.user.name,
+    email: row.user.email,
+    role: row.role,
+    createdAt: row.user.createdAt,
+  }));
   return { users, invites };
 }

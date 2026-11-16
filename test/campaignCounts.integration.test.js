@@ -32,23 +32,24 @@ test('throttled sends show up in campaign counts, Sent list and tracking; stale 
   const user = await prisma.user.create({
     data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: encToken },
   });
-  const list = await prisma.contactList.create({ data: { name: 'L' } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi <a href="https://example.com">link</a></p>' } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
+  const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi <a href="https://example.com">link</a></p>' } });
   const mk = async (prefix, n) => {
     const ids = [];
-    for (let i = 0; i < n; i += 1) ids.push((await prisma.recipient.create({ data: { email: `${prefix}${i}@x.dev`, name: 'P', listId: list.id } })).id);
+    for (let i = 0; i < n; i += 1) ids.push((await prisma.recipient.create({ data: { workspaceId: ws.id, email: `${prefix}${i}@x.dev`, name: 'P', listId: list.id } })).id);
     return ids;
   };
 
   // Old campaign from the pre-throttle batch sender: Email 1 left in "sending" with people
   // still waiting, then a follow-up was created. Its Email 1 must not be resumed silently.
   const oldIds = await mk('old', 3);
-  const old = await cs.createCampaign({ name: 'Old', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: oldIds, listId: list.id, createdById: user.id });
+  const old = await cs.createCampaign({ workspaceId: ws.id, name: 'Old', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: oldIds, listId: list.id, createdById: user.id });
   await prisma.campaignStep.updateMany({ where: { campaignId: old.id }, data: { status: 'sending' } });
   await prisma.campaignStep.create({ data: { campaignId: old.id, stepNumber: 2, name: 'Follow-up 2', subject: 'F', templateId: tpl.id, status: 'pending', recipientIds: oldIds } });
 
   const newIds = await mk('new', 3);
-  const fresh = await cs.createCampaign({ name: 'Construction', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: newIds, listId: list.id, createdById: user.id });
+  const fresh = await cs.createCampaign({ workspaceId: ws.id, name: 'Construction', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: newIds, listId: list.id, createdById: user.id });
   await prisma.campaignStep.updateMany({ where: { campaignId: fresh.id }, data: { status: 'sending' } });
 
   const settings = await scheduler.workspaceSendSettings(ws.id);

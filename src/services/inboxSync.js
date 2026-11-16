@@ -74,7 +74,7 @@ export async function syncInboxForUser(user, { now = new Date(), force = false, 
     const senderEmail = delta.senderEmail || String(user.gmailEmail || '').toLowerCase();
     const notices = delta.messages.flatMap((m) => bounceNoticesFromMessage(m, senderEmail));
     const replies = delta.messages.filter((m) => isReplyCandidate(m, senderEmail));
-    const bounceResult = notices.length ? await applyBounces(notices) : { marked: 0, emails: [] };
+    const bounceResult = notices.length ? await applyBounces(notices, user) : { marked: 0, emails: [] };
     const replyResult = replies.length ? await applyReplies(user, replies) : { scanned: 0, replies: 0, autoReplies: 0, optOuts: 0 };
     await prisma.user.update({
       where: { id: user.id },
@@ -95,8 +95,17 @@ export async function syncInboxForUser(user, { now = new Date(), force = false, 
   }
 }
 
-export async function syncAllInboxes({ force = false, now = new Date(), ...deps } = {}) {
-  const users = await prisma.user.findMany({ where: { gmailRefreshToken: { not: null } } });
+/**
+ * Sync every connected Gmail account. With workspaceId (a manual sync from the app), only
+ * accounts of that workspace's members are synced and counted.
+ */
+export async function syncAllInboxes({ force = false, now = new Date(), workspaceId, ...deps } = {}) {
+  const users = await prisma.user.findMany({
+    where: {
+      gmailRefreshToken: { not: null },
+      ...(workspaceId ? { memberships: { some: { workspaceId } } } : {}),
+    },
+  });
   const out = {
     scanned: 0,
     bouncesMarked: 0,

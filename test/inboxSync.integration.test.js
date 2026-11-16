@@ -22,6 +22,7 @@ test('inbox sync is throttled, leased, incremental, and quota errors never pause
   const user = await prisma.user.create({
     data: { email: 'o@t.dev', name: 'H', passwordHash: 'x', role: 'owner', workspaceId: ws.id, gmailEmail: 'f@gmail.com', gmailRefreshToken: 'enc' },
   });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws.id, userId: user.id, role: 'owner' } });
   const me = () => prisma.user.findUnique({ where: { id: user.id } });
 
   const calls = [];
@@ -81,10 +82,10 @@ test('inbox sync is throttled, leased, incremental, and quota errors never pause
   assert.equal(fresh.inboxSyncErrors, 0);
 
   // Send hitting the per minute quota: short backoff, no pause.
-  const list = await prisma.contactList.create({ data: { name: 'L' } });
-  const tpl = await prisma.template.create({ data: { name: 'T', body: '<p>Hi</p>' } });
-  const r1 = await prisma.recipient.create({ data: { email: 'p@x.dev', name: 'P', listId: list.id } });
-  const c = await cs.createCampaign({ name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: [r1.id], listId: list.id, createdById: user.id });
+  const list = await prisma.contactList.create({ data: { workspaceId: ws.id, name: 'L' } });
+  const tpl = await prisma.template.create({ data: { workspaceId: ws.id, name: 'T', body: '<p>Hi</p>' } });
+  const r1 = await prisma.recipient.create({ data: { workspaceId: ws.id, email: 'p@x.dev', name: 'P', listId: list.id } });
+  const c = await cs.createCampaign({ workspaceId: ws.id, name: 'C', subject: 'S', templateId: tpl.id, scheduledAt: new Date(), recipientIds: [r1.id], listId: list.id, createdById: user.id });
   await prisma.campaignStep.updateMany({ where: { campaignId: c.id }, data: { status: 'sending' } });
   const hooks = { recordSend: cs.recordSend, recordBounce: cs.recordBounce, maybeCompleteCampaign: cs.maybeCompleteCampaign };
   const now = new Date();

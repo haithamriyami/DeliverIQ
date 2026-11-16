@@ -12,7 +12,7 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config/env.js';
 import { runSchedulerTick } from './campaignService.js';
-import { globalPauseFor, workspaceSendSettings, sentTodayCount, nextPendingForSender } from './sendScheduler.js';
+import { workspaceSendSettings, sentTodayCount, nextPendingForSender } from './sendScheduler.js';
 import { normalizeSendSettings } from '../utils/throttle.js';
 
 export const LEASE_NAME = 'sender';
@@ -41,12 +41,14 @@ export async function releaseLease(holder) {
 
 /** Is there anything that could be sent right now or within this run? */
 export async function hasSendableWork() {
-  if (await globalPauseFor()) return false;
-  const settings = normalizeSendSettings(await workspaceSendSettings());
   const senders = await prisma.user.findMany({ where: { gmailRefreshToken: { not: null }, sendingPausedAt: null } });
   for (const sender of senders) {
+    // Work in paused workspaces is skipped by nextPendingForSender.
+    const work = await nextPendingForSender(sender);
+    if (!work) continue;
+    const settings = normalizeSendSettings(await workspaceSendSettings(work.campaign.workspaceId));
     if ((await sentTodayCount(sender.id)) >= settings.dailySendCap) continue;
-    if (await nextPendingForSender(sender)) return true;
+    return true;
   }
   return false;
 }
