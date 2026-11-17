@@ -1204,6 +1204,7 @@ export async function sendTestEmail({ campaignId, to, workspaceId }) {
   return sendCampaignEmail({
     to,
     name: 'there',
+    organization: '',
     subject: `[Test] ${step.subject}`,
     html: template.body,
     campaignId: campaign.id,

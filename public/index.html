@@ -287,7 +287,7 @@
                 </div>
                 <div class="field full">
                   <label for="t-body">HTML body</label>
-                  <textarea id="t-body" name="body" rows="4" required placeholder="<p>Hi {{name}}</p>"></textarea>
+                  <textarea id="t-body" name="body" rows="4" required placeholder="<p>Hi {{name}}, I can help {{organization}}.</p>"></textarea>
                 </div>
                 <div class="form-actions">
                   <button class="btn btn-ghost btn-small" type="button" id="insert-video-btn">Insert video block</button>
@@ -375,6 +375,10 @@
                   <input id="r-email" name="email" type="email" required />
                 </div>
                 <div class="field">
+                  <label for="r-organization">Organization</label>
+                  <input id="r-organization" name="organization" placeholder="Company or organization" />
+                </div>
+                <div class="field">
                   <label for="r-tz">Timezone</label>
                   <input id="r-tz" name="timezone" placeholder="America/New_York" />
                 </div>
@@ -394,6 +398,7 @@
                     <tr>
                       <th>Name</th>
                       <th>Email</th>
+                      <th>Organization</th>
                       <th>List</th>
                       <th>Campaign</th>
                       <th>Timezone</th>

@@ -4,10 +4,40 @@ import { sendViaGmail } from './gmailService.js';
 import { withEngagementTracking, looksLikeHtml, plainTextToHtml } from '../utils/tracking.js';
 import { prisma } from '../lib/prisma.js';
 
-export function interpolate(template, vars) {
-  return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
-    return vars[key] != null ? String(vars[key]) : '';
+export const NAME_FALLBACK = 'there';
+export const ORGANIZATION_FALLBACK = 'your organization';
+
+/** Values used to fill {{name}}, {{organization}} / {{company}}, {{email}} and {{unsubscribeUrl}}. */
+export function mergeFieldValues({ name, email, organization, company, unsubscribeUrl } = {}) {
+  const org = String(organization || company || '').trim() || ORGANIZATION_FALLBACK;
+  const displayName = String(name || '').trim() || NAME_FALLBACK;
+  return {
+    name: displayName,
+    first_name: displayName,
+    email: email == null ? '' : String(email),
+    organization: org,
+    company: org,
+    unsubscribeUrl: unsubscribeUrl || '',
+  };
+}
+
+export function interpolate(template, vars = {}) {
+  const filled = mergeFieldValues(vars);
+  return String(template ?? '').replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => {
+    if (Object.prototype.hasOwnProperty.call(filled, key)) return filled[key];
+    const raw = vars[key];
+    return raw != null ? String(raw) : '';
   });
+}
+
+/** Subject and body with merge fields filled, for previews and tests. No tracking added. */
+export function renderMergePreview({ body = '', subject = '', name, email, organization, company } = {}) {
+  const vars = { name, email, organization, company };
+  return {
+    subject: interpolate(subject, vars),
+    body: interpolate(body, vars),
+    vars: mergeFieldValues(vars),
+  };
 }
 
 function withUnsubscribeFooter(html, unsubscribeUrl) {
@@ -30,8 +60,8 @@ function withUnsubscribeFooter(html, unsubscribeUrl) {
  * Build the HTML that is actually sent: merge fields, plain text templates turned into
  * HTML, the unsubscribe footer, then tracked links (bare URLs included) and the open pixel.
  */
-export function renderEmailHtml({ html, name, to, campaignId, recipientId, stepId, unsubscribeUrl, campaignName }) {
-  const merged = interpolate(html, { name, email: to, unsubscribeUrl: unsubscribeUrl || '' });
+export function renderEmailHtml({ html, name, to, organization, company, campaignId, recipientId, stepId, unsubscribeUrl, campaignName }) {
+  const merged = interpolate(html, { name, email: to, organization, company, unsubscribeUrl: unsubscribeUrl || '' });
   const asHtml = looksLikeHtml(merged) ? merged : plainTextToHtml(merged);
   return withEngagementTracking(withUnsubscribeFooter(asHtml, unsubscribeUrl), {
     campaignId,
@@ -50,6 +80,8 @@ export function renderEmailHtml({ html, name, to, campaignId, recipientId, stepI
 export async function sendCampaignEmail({
   to,
   name,
+  organization,
+  company,
   subject,
   html,
   campaignId,
@@ -61,11 +93,13 @@ export async function sendCampaignEmail({
   campaignName,
   workspaceId,
 }) {
-  const renderedSubject = interpolate(subject, { name, email: to });
+  const renderedSubject = interpolate(subject, { name, email: to, organization, company });
   const renderedHtml = renderEmailHtml({
     html,
     name,
     to,
+    organization,
+    company,
     campaignId,
     recipientId,
     stepId,

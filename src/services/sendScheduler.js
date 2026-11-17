@@ -433,6 +433,7 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
     result = await send({
       to: recipient.email,
       name: recipient.name,
+      organization: recipient.organization,
       subject: step.subject,
       html: (step.template || campaign.template).body,
       campaignId: campaign.id,
