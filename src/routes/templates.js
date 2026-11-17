@@ -5,6 +5,7 @@ const router = Router();
 
 router.post('/', ...templatesController.create);
 router.get('/', templatesController.list);
+router.get('/:id/preview', templatesController.preview);
 router.get('/:id', templatesController.getById);
 router.patch('/:id', ...templatesController.update);
 router.delete('/:id', ...templatesController.remove);

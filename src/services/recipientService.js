@@ -15,7 +15,7 @@ function requireWorkspace(workspaceId) {
   return workspaceId;
 }
 
-export async function createRecipient({ workspaceId, email, name, timezone, notes, listId }) {
+export async function createRecipient({ workspaceId, email, name, organization, timezone, notes, listId }) {
   requireWorkspace(workspaceId);
   const normalized = normalizeEmail(email);
   
@@ -48,6 +48,7 @@ export async function createRecipient({ workspaceId, email, name, timezone, note
       workspaceId,
       email: normalized,
       name,
+      organization: String(organization || '').trim() || null,
       timezone: timezone || 'UTC',
       notes: notes || '',
       listId: list.id,
@@ -69,6 +70,7 @@ export async function listRecipients(workspaceId, status, q, listId) {
     where.OR = [
       { email: { contains: query, mode: 'insensitive' } },
       { name: { contains: query, mode: 'insensitive' } },
+      { organization: { contains: query, mode: 'insensitive' } },
       { notes: { contains: query, mode: 'insensitive' } },
     ];
   }
@@ -337,6 +339,7 @@ export async function importRecipientsFromCsv(
   const nameIndex = headers.name ?? headers.fullname;
   const tzIndex = headers.timezone ?? headers.tz;
   const notesIndex = headers.notes ?? headers.note;
+  const orgIndex = headers.organization ?? headers.organisation ?? headers.company;
 
   const summary = {
     created: 0,
@@ -391,6 +394,7 @@ export async function importRecipientsFromCsv(
     const name = nameIndex != null ? String(row[nameIndex] || '').trim() : '';
     const timezone = tzIndex != null ? String(row[tzIndex] || '').trim() : '';
     const notes = notesIndex != null ? String(row[notesIndex] || '').trim() : '';
+    const organization = orgIndex != null ? String(row[orgIndex] || '').trim() : '';
     const list = await resolveList(timezone, notes);
 
     const existing = await prisma.recipient.findUnique({
@@ -404,6 +408,7 @@ export async function importRecipientsFromCsv(
           workspaceId,
           email,
           name: name || email.split('@')[0],
+          organization: organization || null,
           timezone: timezone || 'UTC',
           notes: notes || '',
           listId: list.id,
@@ -436,6 +441,7 @@ export async function importRecipientsFromCsv(
         name: name || existing.name,
         timezone: timezone || existing.timezone,
         notes: notes || existing.notes,
+        organization: organization || existing.organization,
       },
     });
     summary.updated += 1;

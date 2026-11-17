@@ -555,6 +555,7 @@ async function loadRecipients() {
           (r) => `<tr>
             <td>${escapeHtml(r.name)}</td>
             <td>${escapeHtml(r.email)}</td>
+            <td>${escapeHtml(r.organization || '-')}</td>
             <td>
               <select class="list-option" data-move-list="${r.id}">
                 ${listOptionsHtml(r.listId || r.list?.id || recipientListId)}
@@ -571,7 +572,7 @@ async function loadRecipients() {
           </tr>`
         )
         .join('')
-    : `<tr><td colspan="9" class="empty">No contacts in ${escapeHtml(selectedName)} yet</td></tr>`;
+    : `<tr><td colspan="10" class="empty">No contacts in ${escapeHtml(selectedName)} yet</td></tr>`;
 
   const pickerParams = new URLSearchParams({ status: 'active' });
   if (campaignListId) pickerParams.set('listId', campaignListId);
@@ -593,6 +594,7 @@ function renderRecipientPicker(query) {
       !needle ||
       r.name.toLowerCase().includes(needle) ||
       r.email.toLowerCase().includes(needle) ||
+      String(r.organization || '').toLowerCase().includes(needle) ||
       String(r.notes || '').toLowerCase().includes(needle) ||
       (r.inCampaigns || []).some((c) => c.name.toLowerCase().includes(needle))
   );
@@ -1153,7 +1155,7 @@ document.addEventListener('click', async (event) => {
       form.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     if (previewTemplate) {
-      const template = await api(`/templates/${previewTemplate.dataset.previewTemplate}`);
+      const preview = await api(`/templates/${previewTemplate.dataset.previewTemplate}/preview`);
       const win = window.open('', 'Template Preview', 'width=800,height=600');
       win.document.write(`
         <!DOCTYPE html>
@@ -1161,15 +1163,17 @@ document.addEventListener('click', async (event) => {
         <head>
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>${escapeHtml(template.name)} - Preview</title>
+          <title>${escapeHtml(preview.templateName)} - Preview</title>
           <style>
             body { font-family: system-ui, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; }
-            h1 { font-size: 18px; margin-bottom: 20px; color: #64748b; }
+            h1 { font-size: 18px; margin-bottom: 8px; color: #64748b; }
+            .meta { color: #64748b; font-size: 13px; margin-bottom: 20px; }
           </style>
         </head>
         <body>
-          <h1>Preview: ${escapeHtml(template.name)}</h1>
-          ${template.body}
+          <h1>Preview: ${escapeHtml(preview.templateName)}</h1>
+          <p class="meta">Filled for ${escapeHtml(preview.name)}${preview.organization ? ` at ${escapeHtml(preview.organization)}` : ''}</p>
+          ${preview.html}
         </body>
         </html>
       `);
@@ -1344,6 +1348,7 @@ document.getElementById('recipient-form').addEventListener('submit', async (even
       body: JSON.stringify({
         name: form.name.value.trim(),
         email: form.email.value.trim(),
+        organization: form.organization.value.trim(),
         timezone: form.timezone.value.trim() || 'UTC',
         notes: form.notes.value.trim(),
         listId: recipientListId,

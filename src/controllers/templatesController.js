@@ -3,6 +3,8 @@ import { prisma } from '../lib/prisma.js';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
 import { HttpError } from '../middleware/errorHandler.js';
+import { renderMergePreview } from '../services/emailService.js';
+import { looksLikeHtml, plainTextToHtml } from '../utils/tracking.js';
 
 const createTemplateSchema = z.object({
   body: z.object({
@@ -97,3 +99,46 @@ export const remove = [
     res.json({ ok: true });
   }),
 ];
+
+export const preview = asyncHandler(async (req, res) => {
+  const template = await prisma.template.findFirst({
+    where: { id: String(req.params.id), workspaceId: req.user.workspaceId },
+  });
+  if (!template) {
+    throw new HttpError(404, 'Template not found');
+  }
+
+  let contact = null;
+  const recipientId = typeof req.query.recipientId === 'string' ? req.query.recipientId : '';
+  if (recipientId) {
+    contact = await prisma.recipient.findFirst({
+      where: { id: recipientId, workspaceId: req.user.workspaceId },
+    });
+    if (!contact) {
+      throw new HttpError(404, 'Recipient not found');
+    }
+  } else {
+    contact = await prisma.recipient.findFirst({
+      where: { workspaceId: req.user.workspaceId, status: 'active' },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  const preview = renderMergePreview({
+    body: template.body,
+    name: contact?.name,
+    email: contact?.email,
+    organization: contact?.organization,
+  });
+  const html = looksLikeHtml(preview.body) ? preview.body : plainTextToHtml(preview.body);
+  res.json({
+    templateId: template.id,
+    templateName: template.name,
+    recipientId: contact?.id || null,
+    name: preview.vars.name,
+    email: preview.vars.email,
+    organization: preview.vars.organization,
+    body: preview.body,
+    html,
+  });
+});

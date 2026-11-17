@@ -9,6 +9,7 @@ const createRecipientSchema = z.object({
   body: z.object({
     email: z.string().email(),
     name: z.string().min(1),
+    organization: z.string().optional(),
     timezone: z.string().min(1).optional(),
     notes: z.string().optional(),
     listId: z.string().uuid(),
