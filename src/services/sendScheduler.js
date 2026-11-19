@@ -484,6 +484,16 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks, 
       await pauseSender(sender.id, senderPauseMessage(kind, err));
       return { sent: false, reason: 'sender_paused', error: err.message };
     }
+    if (kind !== 'recipient') {
+      // Sender side or API failure. There is no failed campaign_recipients status, and
+      // creating a row would block a later retry (already_sent) and could count as a bounce.
+      // Leave the contact queued and active, and store the message on lastError only.
+      await prisma.recipient.update({
+        where: { id: recipient.id },
+        data: { lastError: String(err.message || 'Send failed').slice(0, 500) },
+      }).catch(() => {});
+      return { sent: false, reason: 'send_error', email: recipient.email, error: err.message };
+    }
     await hooks.recordBounce?.({
       campaignId: campaign.id,
       recipientId: recipient.id,

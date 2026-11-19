@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   classifySendError,
   isTransientQuotaError,
+  isThreadNotFoundError,
   retryAfterMs,
   backoffMs,
   isQuotaOnlyPauseReason,
@@ -51,4 +52,31 @@ test('auto resume only for quota pauses', () => {
   assert.equal(isQuotaOnlyPauseReason('Gmail returned a rate limit, policy or account restriction error ... Gmail said: Mail service not enabled: account suspended'), false);
   assert.equal(isQuotaOnlyPauseReason('Gmail refused the send because access needs to be reconnected.'), false);
   assert.equal(isQuotaOnlyPauseReason(''), false);
+});
+
+test('404 and Requested entity was not found are send errors, not bounces', () => {
+  assert.equal(classifySendError({ code: 404, message: 'Requested entity was not found.' }), 'send_error');
+  assert.equal(classifySendError({
+    code: 404,
+    message: 'Requested entity was not found.',
+    errors: [{ reason: 'notFound', message: 'Requested entity was not found.' }],
+  }), 'send_error');
+  assert.equal(classifySendError({ status: 404, message: 'Not Found' }), 'send_error');
+  assert.equal(isThreadNotFoundError({ code: 404, message: 'Requested entity was not found.' }), true);
+  assert.equal(isThreadNotFoundError({ message: 'Requested entity was not found.' }), true);
+  assert.equal(isThreadNotFoundError({ code: 400, message: 'Invalid To header' }), false);
+});
+
+test('5xx and network failures are send errors, not bounces', () => {
+  assert.equal(classifySendError({ code: 500, message: 'Internal error' }), 'send_error');
+  assert.equal(classifySendError({ code: 503, message: 'Service unavailable' }), 'send_error');
+  assert.equal(classifySendError({ message: 'socket hang up' }), 'send_error');
+  assert.equal(classifySendError({ message: 'connect ETIMEDOUT 8.8.8.8:443' }), 'send_error');
+});
+
+test('only clear recipient problems are classified as recipient bounces', () => {
+  assert.equal(classifySendError({ code: 400, message: 'Invalid To header' }), 'recipient');
+  assert.equal(classifySendError({ code: 400, message: 'Invalid recipient' }), 'recipient');
+  assert.equal(classifySendError({ message: 'Recipient address rejected: user unknown' }), 'recipient');
+  assert.equal(classifySendError({ code: 400, message: 'Something else went wrong' }), 'send_error');
 });

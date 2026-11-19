@@ -565,6 +565,13 @@ const STATUS_RANK = {
 };
 
 export async function recordSend({ campaignId, recipientId, stepId, messageId, threadId, senderId, senderAccountId }) {
+  // A previous sender/API failure may have left a note on lastError. Clear it once
+  // this contact actually received a later attempt, without touching bounced people.
+  await prisma.recipient.updateMany({
+    where: { id: recipientId, status: 'active' },
+    data: { lastError: '' },
+  });
+
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: { steps: { orderBy: { stepNumber: 'asc' } } },
