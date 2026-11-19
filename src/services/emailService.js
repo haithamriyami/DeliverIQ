@@ -2,10 +2,52 @@ import { env } from '../config/env.js';
 import { sgMail, sendgridEnabled } from '../config/sendgrid.js';
 import { sendViaGmail } from './gmailService.js';
 import { withEngagementTracking, looksLikeHtml, plainTextToHtml } from '../utils/tracking.js';
+import { isThreadNotFoundError } from '../utils/sendErrors.js';
 import { prisma } from '../lib/prisma.js';
 
 export const NAME_FALLBACK = 'there';
 export const ORGANIZATION_FALLBACK = 'your organization';
+
+/**
+ * Thread a follow up only when the earlier step was sent from the same Gmail account.
+ * An unknown earlier sender is treated as different, so the follow up goes out as a
+ * new email instead of asking Gmail for a thread this account may not have.
+ */
+export function shouldThreadFollowUp(previousSenderAccountId, currentAccountId) {
+  return Boolean(
+    previousSenderAccountId &&
+      currentAccountId &&
+      previousSenderAccountId === currentAccountId
+  );
+}
+
+export function threadingForPreviousSend(prevSend, currentAccountId) {
+  if (!prevSend?.messageId || !shouldThreadFollowUp(prevSend.senderAccountId, currentAccountId)) {
+    return {};
+  }
+  return {
+    inReplyTo: prevSend.messageId,
+    references: prevSend.messageId,
+    threadId: prevSend.threadId,
+  };
+}
+
+/**
+ * Send, and if a threaded attempt fails because Gmail cannot find the thread, retry
+ * once immediately as a new email with the same subject and no thread headers.
+ */
+export async function sendWithThreadFallback(send, payload, threading = {}) {
+  const threaded = Boolean(threading.threadId || threading.inReplyTo || threading.references);
+  try {
+    return await send({ ...payload, ...threading });
+  } catch (err) {
+    if (threaded && isThreadNotFoundError(err)) {
+      console.warn(`[send] thread not found, retrying as a new email: ${err.message}`);
+      return send(payload);
+    }
+    throw err;
+  }
+}
 
 /** Values used to fill {{name}}, {{organization}} / {{company}}, {{email}} and {{unsubscribeUrl}}. */
 export function mergeFieldValues({ name, email, organization, company, unsubscribeUrl } = {}) {
@@ -92,6 +134,7 @@ export async function sendCampaignEmail({
   userId,
   campaignName,
   workspaceId,
+  send,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to, organization, company });
   const renderedHtml = renderEmailHtml({
@@ -124,14 +167,16 @@ export async function sendCampaignEmail({
             where: {
               stepId_recipientId: { stepId: prevStep.id, recipientId },
             },
-            select: { messageId: true, threadId: true },
+            select: { messageId: true, threadId: true, senderAccountId: true },
           });
-          
+
           if (prevSend?.messageId) {
-            threadingInfo.inReplyTo = prevSend.messageId;
-            threadingInfo.references = prevSend.messageId;
-            threadingInfo.threadId = prevSend.threadId;
-            break;
+            const nextThreading = threadingForPreviousSend(prevSend, accountId);
+            if (nextThreading.inReplyTo || nextThreading.threadId) {
+              threadingInfo = nextThreading;
+              break;
+            }
+            // Different or unknown sender: keep looking for an earlier step from this account.
           }
         }
       }
@@ -169,7 +214,7 @@ export async function sendCampaignEmail({
     const owner = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { workspaceId: true } });
     workspaceId = owner?.workspaceId;
   }
-  const gmailResult = await sendViaGmail({
+  const gmailPayload = {
     workspaceId,
     to,
     subject: renderedSubject,
@@ -177,8 +222,8 @@ export async function sendCampaignEmail({
     unsubscribeUrl,
     accountId,
     userId,
-    ...threadingInfo,
-  });
+  };
+  const gmailResult = await sendWithThreadFallback(send || sendViaGmail, gmailPayload, threadingInfo);
   if (gmailResult) {
     return gmailResult;
   }

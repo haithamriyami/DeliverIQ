@@ -49,12 +49,24 @@ export function backoffMs(attempt, { baseMs = 60000, maxMs = 30 * 60000, retryAf
   return Math.min(maxMs, Math.max(exp, retryAfter || 0));
 }
 
+// Clear problems with this one address. Anything else is not a bounce.
+const RECIPIENT_RE =
+  /invalid to header|invalid cc header|invalid bcc header|invalid recipient|recipient address required|recipient.*reject|address.*(rejected|invalid|malformed)|invalid.*(?:email|address)|malformed.*address/;
+
+/** Gmail 404 when a thread or message id is not in this account's mailbox. */
+export function isThreadNotFoundError(err) {
+  const { status, blob } = errorParts(err);
+  if (status === 404) return true;
+  return /requested entity was not found|entity was not found|threadid.*(not found|invalid)|thread (id )?(was )?not found|\bnotfound\b/.test(blob);
+}
+
 /**
  * Classify a Gmail send failure.
  * - sender_block: policy, suspension, disabled account, or the account's daily sending limit. Pause.
  * - transient: per minute / per user API quota or rate limit. Back off a little, do not pause.
  * - auth: token revoked or Gmail not connected. Pause until reconnect.
- * - recipient: problem with this one address (treated as a bounce).
+ * - recipient: a clear problem with this one address (treated as a bounce).
+ * - send_error: sender side or API failure (404 thread not found, 5xx, network). Not a bounce.
  */
 export function classifySendError(err) {
   const { status, blob } = errorParts(err);
@@ -67,7 +79,10 @@ export function classifySendError(err) {
     return 'auth';
   }
   if (status === 403 || /forbidden|permission/.test(blob)) return 'auth';
-  return 'recipient';
+  if (RECIPIENT_RE.test(blob)) return 'recipient';
+  // 404, 5xx, network, leftover thread errors, and other unclassified API failures
+  // are not the contact's fault, so they must not be recorded as bounces.
+  return 'send_error';
 }
 
 /** Pause reasons written by the old code for a per minute quota error. Safe to auto resume. */
