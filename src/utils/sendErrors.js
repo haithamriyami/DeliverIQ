@@ -21,14 +21,44 @@ const POLICY_RE =
 // Gmail's sending limits for the account (per day), as opposed to API call rate.
 const SENDING_LIMIT_RE =
   /dailylimitexceeded|daily user sending (quota|limit)|sending (quota|limit) (exceeded|reached)|mail sending limit|exceeded.*sending limit|user has exceeded the maximum number of (messages|recipients)/;
+// Gmail's own daily sending limit as the send API reports it for consumer accounts:
+// "User-rate limit exceeded.  Retry after 2026-11-23T21:34:19.807Z (Mail sending)".
+// Retrying every few minutes never helps; Gmail frees room only as older sends age out.
+const MAIL_SENDING_RATE_RE = /(user-?rate ?limit exceeded|ratelimitexceeded|userratelimitexceeded).*mail sending|mail sending.*(user-?rate ?limit exceeded|ratelimitexceeded)/;
+
+/** Start of the app's note for a sender held by Gmail's daily sending limit. */
+export const DAILY_LIMIT_MARKER = 'Gmail daily sending limit reached';
+
 // Short term API rate or quota: per minute units, per user rate, too many requests.
 const TRANSIENT_QUOTA_RE =
   /units per minute|per minute|total query cost|quota exceeded|ratelimitexceeded|userratelimitexceeded|rate.?limit|too many requests|concurrent requests|backenderror|quota/;
 
+/**
+ * Gmail's daily sending limit for the account (rolling 24 hours), including the
+ * "User-rate limit exceeded ... (Mail sending)" form. Not a policy problem and not a bounce.
+ */
+export function isDailySendingLimitError(err) {
+  const { blob } = errorParts(err);
+  if (POLICY_RE.test(blob)) return false;
+  return SENDING_LIMIT_RE.test(blob) || MAIL_SENDING_RATE_RE.test(blob);
+}
+
+/** The "Retry after <time>" Gmail puts in the message text, or a Retry-After header. */
+export function gmailRetryAt(err, now = Date.now()) {
+  const { blob } = errorParts(err);
+  const match = blob.match(/retry after\s+(\d{4}-\d{2}-\d{2}t[0-9:.]+z?)/);
+  if (match) {
+    const at = Date.parse(match[1].toUpperCase());
+    if (Number.isFinite(at)) return new Date(at);
+  }
+  const header = retryAfterMs(err, now);
+  return header == null ? null : new Date(now + header);
+}
+
 /** Per minute or per user API quota / rate error: back off, never pause. */
 export function isTransientQuotaError(err) {
   const { status, blob } = errorParts(err);
-  if (POLICY_RE.test(blob) || SENDING_LIMIT_RE.test(blob)) return false;
+  if (POLICY_RE.test(blob) || SENDING_LIMIT_RE.test(blob) || MAIL_SENDING_RATE_RE.test(blob)) return false;
   return status === 429 || TRANSIENT_QUOTA_RE.test(blob);
 }
 
@@ -62,7 +92,8 @@ export function isThreadNotFoundError(err) {
 
 /**
  * Classify a Gmail send failure.
- * - sender_block: policy, suspension, disabled account, or the account's daily sending limit. Pause.
+ * - sender_block: policy, suspension or disabled account. Pause.
+ * - daily_limit: Gmail's daily sending limit. Hold the account until room frees up, no pause.
  * - transient: per minute / per user API quota or rate limit. Back off a little, do not pause.
  * - auth: token revoked or Gmail not connected. Pause until reconnect.
  * - recipient: a clear problem with this one address (treated as a bounce).
@@ -70,7 +101,8 @@ export function isThreadNotFoundError(err) {
  */
 export function classifySendError(err) {
   const { status, blob } = errorParts(err);
-  if (POLICY_RE.test(blob) || SENDING_LIMIT_RE.test(blob)) return 'sender_block';
+  if (POLICY_RE.test(blob)) return 'sender_block';
+  if (isDailySendingLimitError(err)) return 'daily_limit';
   if (isTransientQuotaError(err)) return 'transient';
   if (
     status === 401 ||

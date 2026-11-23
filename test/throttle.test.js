@@ -10,6 +10,8 @@ import {
   estimateFinish,
   emailsPerHour,
   averageSendIntervalMs,
+  sendWindowStart,
+  formatSendTime,
 } from '../src/utils/throttle.js';
 import { sendRunBudgetMs } from '../src/utils/background.js';
 
@@ -54,15 +56,24 @@ test('paused sender never sends', () => {
   assert.equal(d.reason, 'paused');
 });
 
-test('daily cap of 200 holds the rest until Nairobi midnight', () => {
+test('daily cap is a rolling 24 hours, not a reset at Nairobi midnight', () => {
   // 23:30 Nairobi on Oct 14 is 20:30 UTC.
   const now = new Date('2026-10-14T20:30:00Z');
   assert.equal(sendDecision({ now, sentToday: 199, settings: {} }).ok, true);
   const capped = sendDecision({ now, sentToday: 200, settings: {} });
   assert.equal(capped.ok, false);
   assert.equal(capped.reason, 'daily_cap');
-  assert.equal(capped.retryAt.toISOString(), '2026-10-14T21:00:00.000Z');
+  // Without a known free up time the safe answer is 24 hours later, never the next midnight.
+  assert.equal(capped.retryAt.toISOString(), '2026-10-15T20:30:00.000Z');
+  // With the time the oldest counted send turns 24 hours old, that is the retry time.
+  const freesAt = new Date('2026-10-15T08:25:52Z');
+  assert.equal(sendDecision({ now, sentToday: 200, settings: {}, capResumesAt: freesAt }).retryAt.toISOString(), freesAt.toISOString());
   assert.equal(sendDecision({ now, sentToday: 50, settings: { dailySendCap: 50 } }).reason, 'daily_cap');
+  assert.equal(sendWindowStart(now).toISOString(), '2026-10-13T20:30:00.000Z');
+});
+
+test('send times read in Nairobi time', () => {
+  assert.equal(formatSendTime(new Date('2026-11-24T08:25:52Z')), '24 Nov 11:25 Nairobi time');
 });
 
 test('Nairobi day boundary, not UTC', () => {
@@ -100,17 +111,21 @@ test('estimated finish: 100 queued at defaults takes about 23 minutes', () => {
   assert.equal(estimateFinish({ now, queued: 1, nextSendAt: next, settings: {} }).getTime(), next.getTime());
 });
 
-test('estimated finish rolls over to the next Nairobi day at the daily cap', () => {
+test('estimated finish waits for room in the rolling 24 hour cap', () => {
   const now = new Date('2026-10-19T07:00:00Z'); // 10:00 Nairobi
-  // 190 sent already, cap 200: 10 today, 40 tomorrow from Nairobi midnight (21:00 UTC).
-  const eta = estimateFinish({ now, queued: 50, sentToday: 190, settings: {} });
-  assert.equal(eta.toISOString(), new Date(Date.parse('2026-10-19T21:00:00Z') + 39 * 14_000).toISOString());
-  // Cap already reached: everything goes tomorrow.
-  const eta2 = estimateFinish({ now, queued: 3, sentToday: 200, settings: {} });
-  assert.equal(eta2.toISOString(), new Date(Date.parse('2026-10-19T21:00:00Z') + 2 * 14_000).toISOString());
-  // More than a full day: 450 queued, 0 sent, cap 200 => finishes on day 3.
-  const eta3 = estimateFinish({ now, queued: 450, sentToday: 0, settings: {} });
-  assert.equal(eta3.toISOString(), new Date(Date.parse('2026-10-20T21:00:00Z') + 49 * 14_000).toISOString());
+  // 190 sent in the last 24 hours, cap 200: 10 now, the other 40 once the oldest send ages out.
+  const freesAt = new Date('2026-10-19T15:00:00Z');
+  const eta = estimateFinish({ now, queued: 50, sentToday: 190, settings: {}, capResumesAt: freesAt });
+  assert.equal(eta.toISOString(), new Date(freesAt.getTime() + 39 * 14_000).toISOString());
+  // Cap already reached: everything waits for room.
+  const eta2 = estimateFinish({ now, queued: 3, sentToday: 200, settings: {}, capResumesAt: freesAt });
+  assert.equal(eta2.toISOString(), new Date(freesAt.getTime() + 2 * 14_000).toISOString());
+  // Unknown free up time: 24 hours after this batch started, never the next midnight.
+  const eta3 = estimateFinish({ now, queued: 3, sentToday: 200, settings: {} });
+  assert.equal(eta3.toISOString(), new Date(now.getTime() + 86_400_000 + 2 * 14_000).toISOString());
+  // More than two full caps: 450 queued, 0 sent, cap 200 => third batch starts 48 hours later.
+  const eta4 = estimateFinish({ now, queued: 450, sentToday: 0, settings: {} });
+  assert.equal(eta4.toISOString(), new Date(now.getTime() + 2 * 86_400_000 + 49 * 14_000).toISOString());
 });
 
 test('background run budget follows the Vercel deadline with a safety margin', () => {
