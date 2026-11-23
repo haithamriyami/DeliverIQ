@@ -11,9 +11,11 @@ import {
   claimSendSlot,
   workspaceSendSettings,
   sentTodayCount,
+  capResumesAt,
+  dailyLimitHold,
 } from './sendScheduler.js';
 import { classifyReply } from '../utils/replyClassifier.js';
-import { sendDecision } from '../utils/throttle.js';
+import { sendDecision, formatSendTime } from '../utils/throttle.js';
 
 /**
  * Optional workspace filter. API calls always pass the active workspace, so a campaign,
@@ -1191,18 +1193,27 @@ export async function sendTestEmail({ campaignId, to, workspaceId }) {
   const sender = await resolveSender(campaign.createdById, campaign.workspaceId);
   if (sender) {
     const settings = await workspaceSendSettings(campaign.workspaceId);
+    const now = new Date();
+    const hold = dailyLimitHold(sender, now);
+    if (hold) {
+      throw new HttpError(429, `Gmail daily sending limit reached for this account. Sending resumes at ${formatSendTime(hold.until)}.`);
+    }
+    const sentToday = await sentTodayCount(sender, now);
     const decision = sendDecision({
-      now: new Date(),
+      now,
       nextSendAt: sender.nextSendAt,
-      sentToday: await sentTodayCount(sender),
+      sentToday,
       settings,
       pausedAt: sender.sendingPausedAt,
+      capResumesAt: sentToday >= settings.dailySendCap
+        ? await capResumesAt(sender, settings.dailySendCap, now, { sentInWindow: sentToday })
+        : null,
     });
     if (!decision.ok || !(await claimSendSlot(sender.id, settings))) {
       const why = decision.reason === 'paused'
         ? 'Sending from this Gmail account is paused. Resume it first.'
         : decision.reason === 'daily_cap'
-          ? 'The daily limit for this Gmail account is reached. Try again tomorrow.'
+          ? `The daily limit for this Gmail account (last 24 hours) is reached. Room frees up at ${formatSendTime(decision.retryAt)}.`
           : 'This Gmail account sent an email a few seconds ago. Try the test again in a moment.';
       throw new HttpError(429, why);
     }

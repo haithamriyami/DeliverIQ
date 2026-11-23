@@ -11,7 +11,10 @@
  *   still fits inside the time budget of this invocation, waits for it and repeats.
  *   With a 50 s budget a tick sends 1 or 2 emails per account and then exits.
  * - The daily cap counts campaign_recipients rows with sender_account_id = account and
- *   sent_at since Africa/Nairobi midnight. Over the cap, emails simply stay queued.
+ *   sent_at in the last 24 hours (rolling, like Gmail's own limit). Over the cap, emails
+ *   simply stay queued until the oldest of those sends is 24 hours old.
+ * - If Gmail itself says the daily sending limit is reached, the account is held (not
+ *   paused) until room frees up, with a note the app shows. No retry loop, no bounce.
  * - Workspaces: Gmail is connected per workspace. Each workspace member links the Gmail
  *   they send from in that workspace (workspace_members.gmail_account_id), so one login can
  *   send from one address in FinanceBridge and another in a personal workspace. A campaign
@@ -26,13 +29,23 @@ import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
 import {
   computeNextSendAt,
   normalizeSendSettings,
-  sendDayStart,
-  nextSendDayStart,
+  sendWindowStart,
+  SEND_WINDOW_MS,
   sendDecision,
   estimateFinish,
   emailsPerHour,
+  formatSendTime,
 } from '../utils/throttle.js';
-import { classifySendError, senderPauseMessage, isQuotaOnlyPauseReason, retryAfterMs, backoffMs, QUOTA_PAUSE_MARKERS } from '../utils/sendErrors.js';
+import {
+  classifySendError,
+  senderPauseMessage,
+  isQuotaOnlyPauseReason,
+  retryAfterMs,
+  backoffMs,
+  gmailRetryAt,
+  QUOTA_PAUSE_MARKERS,
+  DAILY_LIMIT_MARKER,
+} from '../utils/sendErrors.js';
 
 export const BOUNCE_PAUSE_MIN_SENDS = 20;
 export const BOUNCE_PAUSE_RATE = 0.05;
@@ -158,21 +171,81 @@ async function accountRow(account) {
   return account ? prisma.gmailAccount.findUnique({ where: { id: account } }) : null;
 }
 
+function windowWhere(row, now, workspaceId) {
+  const legacy = row.connectedById ? [{ senderAccountId: null, senderId: row.connectedById }] : [];
+  return {
+    sentAt: { gt: sendWindowStart(now) },
+    OR: [{ senderAccountId: row.id }, ...legacy],
+    ...(workspaceId ? { campaign: { workspaceId } } : {}),
+  };
+}
+
 /**
- * Emails sent today from one Gmail address, in every workspace. Sends recorded before
+ * Emails sent from one Gmail address in the last 24 hours, in every workspace. This is the
+ * number the daily cap uses (the name is kept for the API). Sends recorded before
  * sender_account_id existed are counted through the user who connected the address.
  */
 export async function sentTodayCount(account, now = new Date(), { workspaceId } = {}) {
   const row = await accountRow(account);
   if (!row) return 0;
-  const legacy = row.connectedById ? [{ senderAccountId: null, senderId: row.connectedById }] : [];
-  return prisma.campaignRecipient.count({
-    where: {
-      sentAt: { gte: sendDayStart(now) },
-      OR: [{ senderAccountId: row.id }, ...legacy],
-      ...(workspaceId ? { campaign: { workspaceId } } : {}),
+  return prisma.campaignRecipient.count({ where: windowWhere(row, now, workspaceId) });
+}
+
+/**
+ * When the rolling 24 hour cap has room again: the moment the send that keeps the count
+ * at the cap turns 24 hours old. Below the cap it is when the oldest send in the window
+ * ages out (useful for estimates). Null when nothing was sent in the last 24 hours.
+ */
+export async function capResumesAt(account, cap, now = new Date(), { sentInWindow } = {}) {
+  const row = await accountRow(account);
+  if (!row) return null;
+  const where = windowWhere(row, now);
+  const count = sentInWindow ?? (await prisma.campaignRecipient.count({ where }));
+  if (!count) return null;
+  const skip = Math.max(0, count - Math.max(1, cap));
+  const oldest = await prisma.campaignRecipient.findFirst({
+    where,
+    orderBy: { sentAt: 'asc' },
+    skip,
+    select: { sentAt: true },
+  });
+  return oldest?.sentAt ? new Date(oldest.sentAt.getTime() + SEND_WINDOW_MS) : null;
+}
+
+/** Is this account held because Gmail reported its daily sending limit? */
+export function dailyLimitHold(sender, now = new Date()) {
+  if (!sender || sender.sendingPausedAt) return null;
+  if (!String(sender.sendingPausedReason || '').startsWith(DAILY_LIMIT_MARKER)) return null;
+  if (!sender.nextSendAt || sender.nextSendAt <= now) return null;
+  return { until: sender.nextSendAt, reason: sender.sendingPausedReason };
+}
+
+/** Hold an account after Gmail's daily limit error, for at least an hour and at most 24. */
+export const DAILY_LIMIT_MIN_HOLD_MS = 60 * 60 * 1000;
+
+/**
+ * Gmail said the daily sending limit is reached. Hold the account (no pause, so it
+ * resumes by itself) until the later of Gmail's retry time and the time the oldest send
+ * of the last 24 hours ages out. Gmail's own retry time is often only minutes away and
+ * then fails again, so it is never trusted alone.
+ */
+export async function holdSenderForDailyLimit(sender, err, now = new Date()) {
+  const gmailAt = gmailRetryAt(err, now.getTime());
+  // Room frees up when the oldest send of the last 24 hours ages out.
+  const windowAt = await capResumesAt(sender, Number.MAX_SAFE_INTEGER, now);
+  let until = Math.max(now.getTime() + DAILY_LIMIT_MIN_HOLD_MS, gmailAt?.getTime() || 0, windowAt?.getTime() || 0);
+  until = Math.min(until, now.getTime() + SEND_WINDOW_MS);
+  const nextSendAt = new Date(until);
+  const detail = String(err?.message || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  await prisma.gmailAccount.update({
+    where: { id: sender.id },
+    data: {
+      nextSendAt,
+      sendBackoffCount: 0,
+      sendingPausedReason: `${DAILY_LIMIT_MARKER}. Sending resumes by itself at ${formatSendTime(nextSendAt)}. Gmail said: ${detail}`.slice(0, 1000),
     },
   });
+  return nextSendAt;
 }
 
 /**
@@ -403,6 +476,9 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
     nextSendAt: sender.nextSendAt,
     sentToday,
     settings,
+    capResumesAt: sentToday >= normalizeSendSettings(settings).dailySendCap
+      ? await capResumesAt(sender, normalizeSendSettings(settings).dailySendCap, now, { sentInWindow: sentToday })
+      : null,
     pausedAt: sender.sendingPausedAt || (await globalPauseFor(work.campaign.workspaceId)),
   });
   if (!decision.ok) {
@@ -449,8 +525,11 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
     return handleSendError(err, { sender, campaign, step, recipient, hooks, senderUserId: work.senderUserId });
   }
 
-  if (sender.sendBackoffCount) {
-    await prisma.gmailAccount.update({ where: { id: sender.id }, data: { sendBackoffCount: 0 } }).catch(() => {});
+  const heldNote = !sender.sendingPausedAt && String(sender.sendingPausedReason || '').startsWith(DAILY_LIMIT_MARKER);
+  if (sender.sendBackoffCount || heldNote) {
+    await prisma.gmailAccount
+      .update({ where: { id: sender.id }, data: { sendBackoffCount: 0, ...(heldNote ? { sendingPausedReason: '' } : {}) } })
+      .catch(() => {});
   }
 
   // The email is out. Recording must never be mistaken for a send failure: if the campaign
@@ -479,6 +558,11 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks, 
     if (kind === 'transient') {
       const retryAt = await backOffSender(sender, err);
       return { sent: false, reason: 'backoff', retryAt, error: err.message };
+    }
+    if (kind === 'daily_limit') {
+      // The contact did nothing wrong: no bounce, no row, no lastError. It stays queued.
+      const retryAt = await holdSenderForDailyLimit(sender, err);
+      return { sent: false, reason: 'daily_limit', retryAt, error: err.message };
     }
     if (kind === 'sender_block' || kind === 'auth') {
       await pauseSender(sender.id, senderPauseMessage(kind, err));
@@ -575,6 +659,9 @@ export async function sendingStatus(workspaceId) {
       sentTodayCount(sender, now, { workspaceId: ws.id }),
       queuedCountForSender(sender, ws.id),
     ]);
+    const capReached = sentToday >= settings.dailySendCap;
+    const resumesAt = sentToday ? await capResumesAt(sender, settings.dailySendCap, now, { sentInWindow: sentToday }) : null;
+    const hold = dailyLimitHold(sender, now);
     rows.push({
       accountId: sender.id,
       userId: link.userId,
@@ -585,11 +672,14 @@ export async function sendingStatus(workspaceId) {
       sharedWithOtherWorkspaces: sentToday !== sentTodayHere,
       queued,
       dailyCap: settings.dailySendCap,
-      capReached: sentToday >= settings.dailySendCap,
-      resumesAt: sentToday >= settings.dailySendCap ? nextSendDayStart(now) : null,
+      capReached,
+      resumesAt: capReached ? resumesAt : null,
+      // Gmail reported its own daily sending limit: held until this time, then resumes by itself.
+      gmailLimitReached: Boolean(hold),
+      gmailLimitUntil: hold ? hold.until : null,
       estimatedFinish: sender.sendingPausedAt
         ? null
-        : estimateFinish({ now, queued, sentToday, nextSendAt: sender.nextSendAt, settings }),
+        : estimateFinish({ now, queued, sentToday, nextSendAt: sender.nextSendAt, settings, capResumesAt: resumesAt }),
       emailsPerHour: emailsPerHour(settings),
       nextSendAt: sender.nextSendAt,
       inboxNotice: sender.inboxSyncNotice || '',

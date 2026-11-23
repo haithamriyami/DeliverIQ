@@ -791,15 +791,16 @@ function fmtTime(value) {
 }
 
 /**
- * Sent today in this workspace. If the same Gmail is also used by another workspace, the
- * daily limit is shared, so the total for the address is shown too (a number only).
+ * Sent in the last 24 hours in this workspace (the daily cap is a rolling 24 hours). If the
+ * same Gmail is also used by another workspace, the limit is shared, so the total for the
+ * address is shown too (a number only).
  */
 function sentTodayLabel(sender) {
   const here = sender.sentTodayHere ?? sender.sentToday;
   const shared = sender.sharedWithOtherWorkspaces
     ? ` (${fmtNum(sender.sentToday)} in total from this Gmail, which another workspace also uses)`
     : '';
-  return `${fmtNum(here)} of ${fmtNum(sender.dailyCap)} sent today${shared}`;
+  return `${fmtNum(here)} of ${fmtNum(sender.dailyCap)} sent in the last 24 hours${shared}`;
 }
 
 async function loadSendingStatus() {
@@ -815,6 +816,9 @@ async function loadSendingStatus() {
   const meter = document.getElementById('sending-meter');
   const rows = [];
   for (const sender of status.senders || []) {
+    if (sender.gmailLimitReached && !sender.paused) {
+      rows.push(`<div class="banner-row"><div><strong>Gmail daily sending limit reached for ${escapeHtml(sender.email)}</strong>Sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time, by itself. Queued emails stay queued and nothing is counted as a bounce.</div></div>`);
+    }
     if (sender.paused) {
       rows.push(`<div class="banner-row"><div><strong>Sending paused for ${escapeHtml(sender.email)}</strong>${escapeHtml(sender.pausedReason || '')}</div>
         <button class="btn btn-primary btn-small" data-resume-sender="${sender.accountId}">Resume</button></div>`);
@@ -843,6 +847,7 @@ async function loadSendingStatus() {
   if (meter) {
     const parts = (status.senders || []).map((sender) => {
       const base = `${escapeHtml(sender.email)}: ${sentTodayLabel(sender)}, ${fmtNum(sender.queued)} queued`;
+      if (sender.gmailLimitReached && sender.queued) return `${base}. Gmail daily sending limit reached, sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time`;
       if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time${sender.estimatedFinish ? `, all done about ${fmtTime(sender.estimatedFinish)}` : ''}`;
       if (sender.queued && sender.estimatedFinish && !sender.paused && !status.globalPause) {
         return `${base}. About ${fmtNum(sender.emailsPerHour)} per hour, estimated finish ${fmtTime(sender.estimatedFinish)} Nairobi time`;
@@ -856,7 +861,7 @@ async function loadSendingStatus() {
   if (accounts) {
     accounts.innerHTML = (status.senders || []).length
       ? status.senders
-          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${sentTodayLabel(sender)} · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}</span></div>`)
+          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${sentTodayLabel(sender)} · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}${sender.gmailLimitReached && !sender.paused ? ` · Gmail daily limit, resumes ${fmtTime(sender.gmailLimitUntil)}` : ''}</span></div>`)
           .join('')
       : '<p class="muted">No Gmail connected in this workspace yet.</p>';
   }
@@ -870,7 +875,7 @@ async function loadSendingStatus() {
  * When the app is closed, the cron tick keeps sending.
  */
 function scheduleTicks(status) {
-  const busy = !status?.globalPause && (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached);
+  const busy = !status?.globalPause && (status?.senders || []).some((sender) => sender.queued > 0 && !sender.paused && !sender.capReached && !sender.gmailLimitReached);
   if (busy && !tickTimer) {
     tickTimer = setInterval(async () => {
       if (tickBusy || document.hidden) return;

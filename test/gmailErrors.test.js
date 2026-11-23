@@ -7,6 +7,8 @@ import {
   retryAfterMs,
   backoffMs,
   isQuotaOnlyPauseReason,
+  isDailySendingLimitError,
+  gmailRetryAt,
 } from '../src/utils/sendErrors.js';
 
 const QUOTA_MSG =
@@ -25,7 +27,6 @@ test('per minute read quota is transient, never a pause', () => {
 });
 
 test('real sending problems still pause', () => {
-  assert.equal(classifySendError({ code: 403, message: 'Daily user sending quota exceeded.', errors: [{ reason: 'dailyLimitExceeded' }] }), 'sender_block');
   assert.equal(classifySendError({ code: 400, message: 'Mail service not enabled: account suspended' }), 'sender_block');
   assert.equal(classifySendError({ code: 403, message: 'Message rejected for policy reasons' }), 'sender_block');
   assert.equal(classifySendError({ code: 400, message: 'invalid_grant' }), 'auth');
@@ -79,4 +80,33 @@ test('only clear recipient problems are classified as recipient bounces', () => 
   assert.equal(classifySendError({ code: 400, message: 'Invalid recipient' }), 'recipient');
   assert.equal(classifySendError({ message: 'Recipient address rejected: user unknown' }), 'recipient');
   assert.equal(classifySendError({ code: 400, message: 'Something else went wrong' }), 'send_error');
+});
+
+// The exact error financebridge.ai@gmail.com got on Nov 24 2026 after 549 sends in 24 hours.
+const MAIL_SENDING_MSG = 'User-rate limit exceeded.  Retry after 2026-11-23T21:34:19.807Z (Mail sending)';
+
+test('Gmail daily sending limit is its own kind: a hold, not a pause, a retry loop or a bounce', () => {
+  for (const err of [
+    { code: 429, message: MAIL_SENDING_MSG },
+    { code: 403, message: MAIL_SENDING_MSG, errors: [{ reason: 'rateLimitExceeded', message: MAIL_SENDING_MSG }] },
+    { code: 403, message: 'Daily user sending quota exceeded.', errors: [{ reason: 'dailyLimitExceeded' }] },
+    { code: 403, message: 'Daily user sending limit exceeded.' },
+    { code: 550, message: 'The user has exceeded the maximum number of recipients' },
+  ]) {
+    assert.equal(isDailySendingLimitError(err), true, err.message);
+    assert.equal(isTransientQuotaError(err), false, err.message);
+    assert.equal(classifySendError(err), 'daily_limit', err.message);
+  }
+  // Plain per minute rate limits, without "Mail sending", stay a short backoff.
+  assert.equal(classifySendError({ message: 'User-rate limit exceeded' }), 'transient');
+  assert.equal(classifySendError({ code: 403, message: 'User Rate Limit Exceeded', errors: [{ reason: 'userRateLimitExceeded' }] }), 'transient');
+  // Policy problems are still a real pause.
+  assert.equal(classifySendError({ code: 403, message: 'Message rejected for policy reasons. Mail sending' }), 'sender_block');
+});
+
+test('Gmail retry time is read from the message text or a Retry-After header', () => {
+  assert.equal(gmailRetryAt({ message: MAIL_SENDING_MSG }).toISOString(), '2026-11-23T21:34:19.807Z');
+  const now = Date.parse('2026-11-23T21:00:00Z');
+  assert.equal(gmailRetryAt({ message: 'x', response: { headers: { 'retry-after': '60' } } }, now).toISOString(), '2026-11-23T21:01:00.000Z');
+  assert.equal(gmailRetryAt({ message: 'no time here' }, now), null);
 });
