@@ -23,6 +23,13 @@
  *   gmail_accounts row, so the gap and the daily count stay shared per address and can
  *   never be broken. The gap length, jitter and cap number come from the settings of the
  *   workspace whose email is being sent. The kill switch is per workspace.
+ * - SendGrid is a second sender a workspace owner can switch on in Settings (off by
+ *   default). It has one shared gmail_accounts row (email "sendgrid") for its gap, rolling
+ *   24 hour count and holds, and its own daily cap. Gmail and SendGrid work through the
+ *   same queue side by side, each at its own pace and within its own cap, so sending is
+ *   shared between them instead of SendGrid only being a fallback. A short claim row per
+ *   recipient (scheduler_leases, "claim:<step>:<recipient>") makes sure two senders never
+ *   pick the same contact at the same moment.
  */
 import { prisma } from '../lib/prisma.js';
 import { sendCampaignEmail, unsubscribeUrlFor } from './emailService.js';
@@ -46,6 +53,16 @@ import {
   QUOTA_PAUSE_MARKERS,
   DAILY_LIMIT_MARKER,
 } from '../utils/sendErrors.js';
+import {
+  isSendGridAccount,
+  sendGridSettings,
+  sendGridReady,
+  sendGridWorkspaceIds,
+  findSendGridAccount,
+  classifySendGridError,
+  sendGridPauseMessage,
+  SENDGRID_LIMIT_MARKER,
+} from './sendgridService.js';
 
 export const BOUNCE_PAUSE_MIN_SENDS = 20;
 export const BOUNCE_PAUSE_RATE = 0.05;
@@ -84,14 +101,14 @@ export async function setGlobalPause(workspaceId, paused, reason = '') {
  * unsubscribe that happened a moment ago always wins over work picked earlier in a tick.
  * Returns null if the send may go ahead, otherwise a reason string.
  */
-export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, campaignId, recipientId }) {
+export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, campaignId, recipientId, sendgrid = false }) {
   if (!workspaceId) {
     const campaign = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { workspaceId: true } });
     if (!campaign) return 'campaign_deleted';
     workspaceId = campaign.workspaceId;
   }
   const [sender, globalPaused, step, recipient, already, member] = await Promise.all([
-    prisma.gmailAccount.findUnique({ where: { id: senderId }, select: { sendingPausedAt: true, refreshToken: true } }),
+    prisma.gmailAccount.findUnique({ where: { id: senderId }, select: { sendingPausedAt: true, refreshToken: true, email: true } }),
     globalPauseFor(workspaceId),
     prisma.campaignStep.findUnique({
       where: { id: stepId },
@@ -114,10 +131,13 @@ export async function blockReasonAtSendTime({ senderId, workspaceId, stepId, cam
     prisma.workspaceMember.findFirst({ where: { workspaceId, gmailAccountId: senderId }, select: { id: true } }),
   ]);
   if (globalPaused) return 'global_paused';
-  if (!sender?.refreshToken || sender.sendingPausedAt) return 'sender_paused';
+  if (sendgrid) {
+    if (!sender || sender.sendingPausedAt) return 'sender_paused';
+    if (!sendGridReady(await sendGridSettings(workspaceId))) return 'sender_not_in_workspace';
+  } else if (!sender?.refreshToken || sender.sendingPausedAt) return 'sender_paused';
   if (!step || !step.campaign || step.campaignId !== campaignId) return 'campaign_deleted';
   if (step.campaign.workspaceId !== workspaceId) return 'workspace_mismatch';
-  if (!member) return 'sender_not_in_workspace';
+  if (!sendgrid && !member) return 'sender_not_in_workspace';
   if (step.campaign.pausedAt) return 'campaign_paused';
   if (step.status !== 'sending') return 'step_not_queued';
   if (step.stepNumber !== (step.campaign.steps[0]?.stepNumber ?? step.stepNumber)) return 'step_superseded';
@@ -212,10 +232,16 @@ export async function capResumesAt(account, cap, now = new Date(), { sentInWindo
   return oldest?.sentAt ? new Date(oldest.sentAt.getTime() + SEND_WINDOW_MS) : null;
 }
 
-/** Is this account held because Gmail reported its daily sending limit? */
+/** A note written by holdSenderForDailyLimit (Gmail's or SendGrid's daily limit). */
+export function isHoldNote(reason) {
+  const text = String(reason || '');
+  return text.startsWith(DAILY_LIMIT_MARKER) || text.startsWith(SENDGRID_LIMIT_MARKER);
+}
+
+/** Is this account held because Gmail (or SendGrid) reported its daily sending limit? */
 export function dailyLimitHold(sender, now = new Date()) {
   if (!sender || sender.sendingPausedAt) return null;
-  if (!String(sender.sendingPausedReason || '').startsWith(DAILY_LIMIT_MARKER)) return null;
+  if (!isHoldNote(sender.sendingPausedReason)) return null;
   if (!sender.nextSendAt || sender.nextSendAt <= now) return null;
   return { until: sender.nextSendAt, reason: sender.sendingPausedReason };
 }
@@ -237,12 +263,14 @@ export async function holdSenderForDailyLimit(sender, err, now = new Date()) {
   until = Math.min(until, now.getTime() + SEND_WINDOW_MS);
   const nextSendAt = new Date(until);
   const detail = String(err?.message || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const sendgrid = isSendGridAccount(sender);
+  const marker = sendgrid ? SENDGRID_LIMIT_MARKER : DAILY_LIMIT_MARKER;
   await prisma.gmailAccount.update({
     where: { id: sender.id },
     data: {
       nextSendAt,
       sendBackoffCount: 0,
-      sendingPausedReason: `${DAILY_LIMIT_MARKER}. Sending resumes by itself at ${formatSendTime(nextSendAt)}. Gmail said: ${detail}`.slice(0, 1000),
+      sendingPausedReason: `${marker}. Sending resumes by itself at ${formatSendTime(nextSendAt)}. ${sendgrid ? 'SendGrid' : 'Gmail'} said: ${detail}`.slice(0, 1000),
     },
   });
   return nextSendAt;
@@ -383,16 +411,75 @@ export async function queuedSteps({ pausedWorkspaces = false } = {}) {
   return steps.filter((step) => step.stepNumber === (step.campaign.steps[0]?.stepNumber ?? step.stepNumber));
 }
 
+export const RECIPIENT_CLAIM_MS = 2 * 60 * 1000;
+
+function claimName(stepId, recipientId) {
+  return `claim:${stepId}:${recipientId}`;
+}
+
+/**
+ * Claim one contact of one step for this sender, so a second sender working the same queue
+ * at the same moment picks someone else. Expired claims (a crashed run) can be taken over.
+ */
+export async function claimRecipient(stepId, recipientId, holder, now = new Date()) {
+  const name = claimName(stepId, recipientId);
+  const expiresAt = new Date(now.getTime() + RECIPIENT_CLAIM_MS);
+  try {
+    await prisma.schedulerLease.create({ data: { name, holder, expiresAt } });
+    return true;
+  } catch {
+    // Someone holds it: take it only if that claim has expired.
+  }
+  const result = await prisma.schedulerLease.updateMany({
+    where: { name, OR: [{ expiresAt: { lt: now } }, { holder }] },
+    data: { holder, expiresAt },
+  });
+  return result.count === 1;
+}
+
+export async function releaseRecipientClaim(stepId, recipientId, holder) {
+  await prisma.schedulerLease.deleteMany({ where: { name: claimName(stepId, recipientId), holder } }).catch(() => {});
+}
+
+/** Contacts of this step another sender is working on right now. */
+async function claimedByOthers(stepId, holder, now = new Date()) {
+  const rows = await prisma.schedulerLease.findMany({
+    where: { name: { startsWith: `claim:${stepId}:` }, expiresAt: { gt: now }, NOT: { holder } },
+    select: { name: true },
+  });
+  return new Set(rows.map((row) => row.name.slice(`claim:${stepId}:`.length)));
+}
+
+/**
+ * May this sender send this step? Gmail: only the Gmail resolveSender picks for the
+ * campaign. SendGrid: when it is switched on for the campaign's workspace.
+ * Returns { senderUserId } or null.
+ */
+async function senderServesStep(sender, step, sendGridIds) {
+  if (isSendGridAccount(sender)) {
+    if (!sendGridIds.has(step.campaign.workspaceId)) return null;
+    return { senderUserId: step.campaign.createdById || null };
+  }
+  const owner = await resolveSender(step.campaign.createdById, step.campaign.workspaceId);
+  if (!owner || owner.id !== sender.id) return null;
+  return { senderUserId: owner.userId };
+}
+
+async function sendGridIdSet(sender) {
+  return isSendGridAccount(sender) ? new Set(await sendGridWorkspaceIds()) : new Set();
+}
+
 /**
  * Find the next recipient to send for this sender, across all queued campaigns and follow-ups.
  * Oldest campaign first, Email 1 before follow-ups.
  */
 export async function nextPendingForSender(sender, { pausedWorkspaces = false } = {}) {
   const steps = await queuedSteps({ pausedWorkspaces });
+  const sendGridIds = await sendGridIdSet(sender);
 
   for (const step of steps) {
-    const owner = await resolveSender(step.campaign.createdById, step.campaign.workspaceId);
-    if (!owner || owner.id !== sender.id) continue;
+    const serves = await senderServesStep(sender, step, sendGridIds);
+    if (!serves) continue;
 
     const audience = step.recipientIds?.length ? step.recipientIds : step.campaign.recipientIds;
     if (!audience.length) continue;
@@ -402,6 +489,7 @@ export async function nextPendingForSender(sender, { pausedWorkspaces = false } 
       select: { recipientId: true },
     });
     const done = new Set(processed.map((row) => row.recipientId));
+    for (const id of await claimedByOthers(step.id, sender.id)) done.add(id);
     const candidates = await prisma.recipient.findMany({
       where: {
         id: { in: audience },
@@ -414,7 +502,7 @@ export async function nextPendingForSender(sender, { pausedWorkspaces = false } 
     });
     const recipient = candidates.find((row) => !done.has(row.id));
     if (recipient) {
-      return { step, campaign: step.campaign, recipient, senderUserId: owner.userId };
+      return { step, campaign: step.campaign, recipient, senderUserId: serves.senderUserId };
     }
   }
   return null;
@@ -422,11 +510,11 @@ export async function nextPendingForSender(sender, { pausedWorkspaces = false } 
 
 export async function queuedCountForSender(sender, workspaceId) {
   const steps = await queuedSteps();
+  const sendGridIds = await sendGridIdSet(sender);
   let total = 0;
   for (const step of steps) {
     if (workspaceId && step.campaign.workspaceId !== workspaceId) continue;
-    const owner = await resolveSender(step.campaign.createdById, step.campaign.workspaceId);
-    if (!owner || owner.id !== sender.id) continue;
+    if (!(await senderServesStep(sender, step, sendGridIds))) continue;
     const audience = step.recipientIds?.length ? step.recipientIds : step.campaign.recipientIds;
     const [processed, candidates] = await Promise.all([
       prisma.campaignRecipient.findMany({ where: { stepId: step.id }, select: { recipientId: true } }),
@@ -468,8 +556,14 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   }
 
   // The gap length and cap come from the workspace being sent for; the count of emails
-  // sent today is per Gmail account across every workspace.
+  // sent today is per Gmail account across every workspace. SendGrid uses the workspace's
+  // gap and its own daily cap from the SendGrid settings.
+  const sendgrid = isSendGridAccount(sender);
   settings = settings || (await workspaceSendSettings(work.campaign.workspaceId));
+  if (sendgrid) {
+    const sg = await sendGridSettings(work.campaign.workspaceId);
+    settings = { ...settings, dailySendCap: sg.dailyCap };
+  }
   const sentToday = await sentTodayCount(sender, now);
   const decision = sendDecision({
     now,
@@ -491,12 +585,27 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   }
 
   const { step, campaign, recipient } = work;
+  if (!(await claimRecipient(step.id, recipient.id, sender.id, now))) {
+    // Another sender took this contact a moment ago. Try again with the next one.
+    await releaseSlot(sender.id, sender.nextSendAt);
+    return { sent: false, reason: 'gap', retryAt: null };
+  }
+  try {
+    return await sendClaimed({ sender, settings, work, send, hooks, sendgrid });
+  } finally {
+    await releaseRecipientClaim(step.id, recipient.id, sender.id);
+  }
+}
+
+async function sendClaimed({ sender, work, send, hooks, sendgrid }) {
+  const { step, campaign, recipient } = work;
   const blocked = await blockReasonAtSendTime({
     senderId: sender.id,
     workspaceId: campaign.workspaceId,
     stepId: step.id,
     campaignId: campaign.id,
     recipientId: recipient.id,
+    sendgrid,
   });
   if (blocked) {
     await releaseSlot(sender.id, sender.nextSendAt);
@@ -520,12 +629,13 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
       userId: work.senderUserId,
       campaignName: campaign.name,
       workspaceId: campaign.workspaceId,
+      provider: sendgrid ? 'sendgrid' : 'gmail',
     });
   } catch (err) {
     return handleSendError(err, { sender, campaign, step, recipient, hooks, senderUserId: work.senderUserId });
   }
 
-  const heldNote = !sender.sendingPausedAt && String(sender.sendingPausedReason || '').startsWith(DAILY_LIMIT_MARKER);
+  const heldNote = !sender.sendingPausedAt && isHoldNote(sender.sendingPausedReason);
   if (sender.sendBackoffCount || heldNote) {
     await prisma.gmailAccount
       .update({ where: { id: sender.id }, data: { sendBackoffCount: 0, ...(heldNote ? { sendingPausedReason: '' } : {}) } })
@@ -548,12 +658,13 @@ export async function sendOneForSender(sender, settings, { now = new Date(), sen
   } catch (err) {
     console.error(`[send] sent to ${recipient.email} but could not record it: ${err.message}`);
   }
-  return { sent: true, campaignId: campaign.id, stepId: step.id, email: recipient.email };
+  return { sent: true, campaignId: campaign.id, stepId: step.id, email: recipient.email, provider: sendgrid ? 'sendgrid' : 'gmail' };
 }
 
 async function handleSendError(err, { sender, campaign, step, recipient, hooks, senderUserId }) {
   {
-    const kind = classifySendError(err);
+    const sendgrid = isSendGridAccount(sender);
+    const kind = sendgrid ? classifySendGridError(err) : classifySendError(err);
     console.error(`[send] ${kind} for ${recipient.email}: ${err.message}`);
     if (kind === 'transient') {
       const retryAt = await backOffSender(sender, err);
@@ -565,7 +676,7 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks, 
       return { sent: false, reason: 'daily_limit', retryAt, error: err.message };
     }
     if (kind === 'sender_block' || kind === 'auth') {
-      await pauseSender(sender.id, senderPauseMessage(kind, err));
+      await pauseSender(sender.id, sendgrid ? sendGridPauseMessage(err) : senderPauseMessage(kind, err));
       return { sent: false, reason: 'sender_paused', error: err.message };
     }
     if (kind !== 'recipient') {
@@ -593,6 +704,22 @@ async function handleSendError(err, { sender, campaign, step, recipient, hooks, 
 }
 
 /**
+ * Every sender that may send: connected Gmail accounts, plus the shared SendGrid row when
+ * at least one workspace has SendGrid switched on and the key is set.
+ */
+export async function activeSenders() {
+  const gmail = await prisma.gmailAccount.findMany({
+    where: { refreshToken: { not: null }, sendingPausedAt: null },
+  });
+  const senders = gmail.filter((row) => !isSendGridAccount(row));
+  if ((await sendGridWorkspaceIds()).length) {
+    const sg = await findSendGridAccount();
+    if (sg && !sg.sendingPausedAt) senders.push(sg);
+  }
+  return senders;
+}
+
+/**
  * One scheduler tick. Sends due emails for every connected sender, then waits for the
  * next due slot only if it fits inside budgetMs. Safe to call concurrently.
  */
@@ -602,9 +729,7 @@ export async function runSendTick({ budgetMs = 0, hooks } = {}) {
 
   await resumeQuotaPausedSenders();
   for (;;) {
-    const senders = await prisma.gmailAccount.findMany({
-      where: { refreshToken: { not: null }, sendingPausedAt: null },
-    });
+    const senders = await activeSenders();
     let earliest = null;
     let anyWork = false;
     for (const sender of senders) {
@@ -664,6 +789,7 @@ export async function sendingStatus(workspaceId) {
     const hold = dailyLimitHold(sender, now);
     rows.push({
       accountId: sender.id,
+      provider: 'gmail',
       userId: link.userId,
       email: sender.email,
       name: link.user?.name || '',
@@ -689,6 +815,10 @@ export async function sendingStatus(workspaceId) {
       pausedReason: sender.sendingPausedReason,
     });
   }
+  if (ws) {
+    const sgRow = await sendGridStatusRow(ws, settings, now);
+    if (sgRow) rows.push(sgRow);
+  }
   const pausedCampaigns = ws
     ? await prisma.campaign.findMany({
         where: { pausedAt: { not: null }, workspaceId: ws.id },
@@ -700,5 +830,52 @@ export async function sendingStatus(workspaceId) {
     senders: rows,
     pausedCampaigns,
     globalPause: ws?.sendingPausedAt ? { pausedAt: ws.sendingPausedAt, reason: ws.sendingPausedReason } : null,
+  };
+}
+
+/** The SendGrid line for the status panel, when SendGrid is switched on for this workspace. */
+async function sendGridStatusRow(ws, settings, now) {
+  const sg = await sendGridSettings(ws.id, { workspace: ws });
+  if (!sg.enabled) return null;
+  const sender = await findSendGridAccount();
+  if (!sender) return null;
+  const sgSettings = { ...settings, dailySendCap: sg.dailyCap };
+  const [sentToday, sentTodayHere, queued] = await Promise.all([
+    sentTodayCount(sender, now),
+    sentTodayCount(sender, now, { workspaceId: ws.id }),
+    queuedCountForSender(sender, ws.id),
+  ]);
+  const capReached = sentToday >= sg.dailyCap;
+  const resumesAt = sentToday ? await capResumesAt(sender, sg.dailyCap, now, { sentInWindow: sentToday }) : null;
+  const hold = dailyLimitHold(sender, now);
+  return {
+    accountId: sender.id,
+    provider: 'sendgrid',
+    userId: null,
+    email: sg.fromEmail || 'SendGrid',
+    name: sg.fromName,
+    ready: sendGridReady(sg),
+    keyConfigured: sg.keyConfigured,
+    sentToday,
+    sentTodayHere,
+    sharedWithOtherWorkspaces: sentToday !== sentTodayHere,
+    // Gmail and SendGrid work through the same queue, so this is the workspace's queue.
+    queued,
+    sharedQueue: true,
+    dailyCap: sg.dailyCap,
+    capReached,
+    resumesAt: capReached ? resumesAt : null,
+    gmailLimitReached: Boolean(hold),
+    gmailLimitUntil: hold ? hold.until : null,
+    estimatedFinish: sender.sendingPausedAt
+      ? null
+      : estimateFinish({ now, queued, sentToday, nextSendAt: sender.nextSendAt, settings: sgSettings, capResumesAt: resumesAt }),
+    emailsPerHour: emailsPerHour(sgSettings),
+    nextSendAt: sender.nextSendAt,
+    inboxNotice: '',
+    inboxLastSyncAt: null,
+    paused: Boolean(sender.sendingPausedAt),
+    pausedAt: sender.sendingPausedAt,
+    pausedReason: sender.sendingPausedReason,
   };
 }

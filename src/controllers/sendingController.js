@@ -11,6 +11,13 @@ import { SETTINGS_LIMITS, normalizeSendSettings } from '../utils/throttle.js';
 import { runInBackground, canRunInBackground, sendRunBudgetMs } from '../utils/background.js';
 import { runBackgroundSender } from '../services/backgroundSender.js';
 import { syncAllInboxes } from '../services/inboxSync.js';
+import {
+  sendGridSettings,
+  saveSendGridSettings,
+  findSendGridAccount,
+  SENDGRID_CAP_LIMITS,
+  DEFAULT_SENDGRID_DAILY_CAP,
+} from '../services/sendgridService.js';
 
 
 function cronAuthorized(req) {
@@ -84,6 +91,17 @@ export const resumeSender = [
   validate(resumeSenderSchema),
   asyncHandler(async (req, res) => {
     const { accountId } = req.validated.body;
+    const sendgrid = await findSendGridAccount();
+    if (sendgrid && sendgrid.id === accountId) {
+      if (!(await sendGridSettings(req.user.workspaceId)).enabled) {
+        throw new HttpError(404, 'Sender not found in this workspace');
+      }
+      if (req.user.role !== 'owner') {
+        throw new HttpError(403, 'Only the workspace owner can resume SendGrid');
+      }
+      await scheduler.resumeSender(accountId);
+      return res.json({ ok: true });
+    }
     const links = await prisma.workspaceMember.findMany({
       where: { workspaceId: req.user.workspaceId, gmailAccountId: accountId },
       select: { userId: true },
@@ -151,6 +169,12 @@ export const getSettings = asyncHandler(async (req, res) => {
     defaultDisplayName: req.user.name,
     sendingPausedAt: ws?.sendingPausedAt || null,
     limits: SETTINGS_LIMITS,
+    sendgrid: {
+      ...(await sendGridSettings(req.user.workspaceId, { workspace: ws })),
+      defaultDailyCap: DEFAULT_SENDGRID_DAILY_CAP,
+      limits: SENDGRID_CAP_LIMITS,
+      webhookUrl: `${env.appUrl}/webhooks/sendgrid`,
+    },
   });
 });
 
@@ -162,6 +186,15 @@ const settingsSchema = z.object({
     dailySendCap: z.coerce.number().int().min(L.dailySendCap.min).max(L.dailySendCap.max).optional(),
     fromDisplayName: z.string().max(80).optional(),
     replyToEmail: z.union([z.string().email(), z.literal('')]).optional(),
+    sendgrid: z
+      .object({
+        enabled: z.boolean().optional(),
+        dailyCap: z.coerce.number().int().min(SENDGRID_CAP_LIMITS.min).max(SENDGRID_CAP_LIMITS.max).optional(),
+        fromEmail: z.union([z.string().email(), z.literal('')]).optional(),
+        fromName: z.string().max(80).optional(),
+        replyToEmail: z.union([z.string().email(), z.literal('')]).optional(),
+      })
+      .optional(),
   }),
   params: z.any().optional(),
   query: z.any().optional(),
@@ -186,7 +219,33 @@ export const updateSettings = [
       data.fromDisplayName = name || null;
     }
     if (body.replyToEmail != null) data.replyToEmail = body.replyToEmail || null;
-    await prisma.workspace.update({ where: { id: req.user.workspaceId }, data });
+    if (body.sendgrid) {
+      const sg = body.sendgrid;
+      if (sg.fromName && sg.fromName.trim().toLowerCase() === 'deliveriq') {
+        throw new HttpError(400, 'Use your own name or company name as the SendGrid sender name');
+      }
+      if (sg.enabled) {
+        const current = await sendGridSettings(req.user.workspaceId);
+        if (!current.keyConfigured) {
+          throw new HttpError(400, 'SENDGRID_API_KEY is not set on the server, so SendGrid cannot be switched on yet.');
+        }
+        const from = sg.fromEmail != null ? sg.fromEmail : current.fromEmail;
+        if (!from) {
+          throw new HttpError(400, 'Enter the SendGrid From address before switching SendGrid on.');
+        }
+      }
+    }
+    if (Object.keys(data).length) {
+      await prisma.workspace.update({ where: { id: req.user.workspaceId }, data });
+    }
+    if (body.sendgrid) {
+      try {
+        await saveSendGridSettings(req.user.workspaceId, body.sendgrid);
+      } catch (err) {
+        if (err.status === 503) throw new HttpError(503, err.message);
+        throw err;
+      }
+    }
     res.json({ ok: true });
   }),
 ];

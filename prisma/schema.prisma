@@ -44,6 +44,7 @@ model Workspace {
   lists      ContactList[]
   templates  Template[]
   campaigns  Campaign[]
+  sendgridSender SendgridSender?
 
   gmailEmail        String?   @map("gmail_email")
   gmailRefreshToken String?   @map("gmail_refresh_token")
@@ -341,4 +342,24 @@ model SchedulerLease {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("scheduler_leases")
+}
+
+/// SendGrid as a second sender for one workspace, next to its Gmail. Off until the owner
+/// turns it on in Settings. The API key is never stored here: it comes from the
+/// SENDGRID_API_KEY environment variable. The gap, the rolling 24 hour count and any hold
+/// live on one shared gmail_accounts row (email "sendgrid"), the same way a Gmail address
+/// shared by two workspaces shares one row, so the SendGrid account limit is never broken.
+model SendgridSender {
+  workspaceId  String   @id @map("workspace_id")
+  enabled      Boolean  @default(false)
+  dailyCap     Int      @default(100) @map("daily_cap")
+  fromEmail    String   @default("") @map("from_email")
+  fromName     String   @default("") @map("from_name")
+  replyToEmail String   @default("") @map("reply_to_email")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("sendgrid_senders")
 }

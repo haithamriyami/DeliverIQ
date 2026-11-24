@@ -426,7 +426,7 @@
               <div class="team-list">
                 <p class="muted" id="gmail-status">Checking Gmail…</p>
                 <div id="gmail-actions" style="margin: 10px 0 16px"></div>
-                <p class="muted" id="sendgrid-status">Checking SendGrid…</p>
+                <p class="muted" id="sendgrid-status"></p>
                 <p class="muted">No domain needed. Connect Gmail to send as your Google address. DeliverIQ sends slowly on purpose to protect the account: one email at a time with a pause between each, and a daily limit per Gmail account.</p>
                 <p class="muted">If Gmail says it will retry a bounced address for 45 hours, that retry is inside Gmail. DeliverIQ cannot stop it. Check Gmail bounces, remove those contacts, and they will not get a follow-up from this app.</p>
               </div>
@@ -462,6 +462,43 @@
                 </div>
                 <div class="form-actions">
                   <button class="btn btn-primary" type="submit">Save sending settings</button>
+                </div>
+              </form>
+            </article>
+            <article class="card settings-card" style="margin-bottom: 16px">
+              <div class="card-head"><h2>SendGrid (second sender)</h2></div>
+              <div class="team-list">
+                <p class="muted" id="sg-key-status">Checking SendGrid…</p>
+                <p class="muted">When SendGrid is on, it sends next to Gmail from the same queue: both send at the same time, each with its own daily limit. Off by default. The API key stays on the server (SENDGRID_API_KEY) and is never shown here.</p>
+              </div>
+              <form id="sendgrid-settings-form" class="form-grid">
+                <div class="field">
+                  <label><input id="sg-enabled" name="enabled" type="checkbox" /> Send through SendGrid too</label>
+                </div>
+                <div class="field">
+                  <label for="sg-from-email">From address (on a domain verified in SendGrid)</label>
+                  <input id="sg-from-email" name="fromEmail" type="email" placeholder="hello@yourdomain.com" />
+                </div>
+                <div class="field">
+                  <label for="sg-from-name">From name people see</label>
+                  <input id="sg-from-name" name="fromName" maxlength="80" placeholder="Your company" />
+                </div>
+                <div class="field">
+                  <label for="sg-reply-to">Reply-To address</label>
+                  <input id="sg-reply-to" name="replyToEmail" type="email" placeholder="you@example.com" />
+                  <p class="muted">Replies go here. Use an inbox you read, for example your Gmail.</p>
+                </div>
+                <div class="field">
+                  <label for="sg-cap">Daily limit for SendGrid (last 24 hours)</label>
+                  <input id="sg-cap" name="dailyCap" type="number" min="1" max="2000" required />
+                  <p class="muted">The free SendGrid plan allows 100 a day.</p>
+                </div>
+                <div class="field">
+                  <label>Event Webhook URL to paste in SendGrid</label>
+                  <p class="muted" id="sg-webhook-url"></p>
+                </div>
+                <div class="form-actions">
+                  <button class="btn btn-primary" type="submit">Save SendGrid settings</button>
                 </div>
               </form>
             </article>

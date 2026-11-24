@@ -14,7 +14,15 @@ export function createApp() {
 
   app.use(cors({ origin: true, credentials: true }));
   app.use(cookieParser());
-  app.use(express.json({ limit: '2mb' }));
+  app.use(
+    express.json({
+      limit: '2mb',
+      // The SendGrid Event Webhook signature is over the exact bytes received.
+      verify: (req, _res, buf) => {
+        if (req.originalUrl?.startsWith('/webhooks/')) req.rawBody = buf;
+      },
+    })
+  );
   app.use(express.urlencoded({ extended: true }));
 
   app.get('/sw.js', (_req, res) => {

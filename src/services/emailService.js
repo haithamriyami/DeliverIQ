@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
-import { sgMail, sendgridEnabled } from '../config/sendgrid.js';
 import { sendViaGmail } from './gmailService.js';
+import { sendViaSendGrid } from './sendgridService.js';
 import { withEngagementTracking, looksLikeHtml, plainTextToHtml } from '../utils/tracking.js';
 import { isThreadNotFoundError } from '../utils/sendErrors.js';
 import { prisma } from '../lib/prisma.js';
@@ -115,9 +115,13 @@ export function renderEmailHtml({ html, name, to, organization, company, campaig
 }
 
 /**
- * Placeholder-aware SendGrid send.
- * When SENDGRID_DRY_RUN=true or the API key is a placeholder,
- * logs the payload instead of calling the network.
+ * Send one campaign email from the sender the scheduler picked.
+ * provider "gmail" (default): the Gmail account accountId, threaded onto an earlier step
+ * only when that step went out from the same Gmail account.
+ * provider "sendgrid": through SendGrid with the workspace's SendGrid settings. A SendGrid
+ * email is always a new email (never threaded): SendGrid's message id is not a Gmail thread,
+ * and a follow up from a different sender than Email 1 goes out as a new email anyway.
+ * There is no silent fallback from one provider to the other.
  */
 export async function sendCampaignEmail({
   to,
@@ -135,6 +139,8 @@ export async function sendCampaignEmail({
   campaignName,
   workspaceId,
   send,
+  provider = 'gmail',
+  sendgridSend,
 }) {
   const renderedSubject = interpolate(subject, { name, email: to, organization, company });
   const renderedHtml = renderEmailHtml({
@@ -149,6 +155,22 @@ export async function sendCampaignEmail({
     unsubscribeUrl,
     campaignName,
   });
+
+  if (!workspaceId && campaignId) {
+    const owner = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { workspaceId: true } });
+    workspaceId = owner?.workspaceId;
+  }
+
+  if (provider === 'sendgrid') {
+    return (sendgridSend || sendViaSendGrid)({
+      workspaceId,
+      to,
+      subject: renderedSubject,
+      html: renderedHtml,
+      unsubscribeUrl,
+      customArgs: { campaignId, recipientId, stepId, senderAccountId: accountId },
+    });
+  }
 
   let threadingInfo = {};
   if (stepId) {
@@ -183,37 +205,8 @@ export async function sendCampaignEmail({
     }
   }
 
-  const message = {
-    to,
-    from: {
-      email: env.sendgrid.fromEmail,
-      name: env.sendgrid.fromName,
-    },
-    subject: renderedSubject,
-    html: renderedHtml,
-    customArgs: {
-      campaignId,
-      recipientId,
-    },
-    trackingSettings: {
-      clickTracking: { enable: true },
-      openTracking: { enable: true },
-    },
-  };
-
-  if (unsubscribeUrl) {
-    message.headers = {
-      'List-Unsubscribe': `<${unsubscribeUrl}>`,
-      'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-    };
-  }
-
   // Display name comes from Settings or the connected user's name (see resolveDisplayName).
   // The workspace being sent for decides the From name and reply to address.
-  if (!workspaceId && campaignId) {
-    const owner = await prisma.campaign.findUnique({ where: { id: campaignId }, select: { workspaceId: true } });
-    workspaceId = owner?.workspaceId;
-  }
   const gmailPayload = {
     workspaceId,
     to,
@@ -228,16 +221,9 @@ export async function sendCampaignEmail({
     return gmailResult;
   }
 
-  if (!sendgridEnabled) {
-    throw new Error('Connect Gmail in Settings before sending. Nothing was delivered.');
-  }
-
-  const [response] = await sgMail.send(message);
-  return {
-    dryRun: false,
-    messageId: response.headers['x-message-id'] ?? null,
-    statusCode: response.statusCode,
-  };
+  // The old code fell back to SendGrid here when no Gmail was connected. SendGrid is now its
+  // own sender, switched on in Settings, so a missing Gmail never sends anything elsewhere.
+  throw new Error('Connect Gmail in Settings before sending. Nothing was delivered.');
 }
 
 export function unsubscribeUrlFor(token) {
