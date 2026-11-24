@@ -4,7 +4,8 @@ import { validate } from '../middleware/validate.js';
 import { requireAuth, requireOwner, setAuthCookie, clearAuthCookie, publicUser, activeUser } from '../middleware/auth.js';
 import * as authService from '../services/authService.js';
 import { env } from '../config/env.js';
-import { sendgridEnabled } from '../config/sendgrid.js';
+import { sendgridKeyConfigured } from '../config/sendgrid.js';
+import { sendGridSettings } from '../services/sendgridService.js';
 import * as gmailService from '../services/gmailService.js';
 import { isPrivateAppUrl } from '../utils/tracking.js';
 
@@ -61,10 +62,7 @@ export const status = asyncHandler(async (_req, res) => {
   res.json({
     ...setup,
     sendgrid: {
-      enabled: sendgridEnabled,
-      dryRun: env.sendgrid.dryRun,
-      fromEmail: env.sendgrid.fromEmail,
-      fromName: env.sendgrid.fromName,
+      keyConfigured: sendgridKeyConfigured,
     },
     google: {
       configured: gmailService.googleConfigured(),
@@ -111,12 +109,7 @@ export const me = [
     res.json({
       user: publicUser(req.user),
       workspaces: await authService.listWorkspacesForUser(req.user.id),
-      sendgrid: {
-        enabled: sendgridEnabled,
-        dryRun: env.sendgrid.dryRun,
-        fromEmail: env.sendgrid.fromEmail,
-        fromName: env.sendgrid.fromName,
-      },
+      sendgrid: await sendGridSettings(req.user.workspaceId),
       google: await gmailService.gmailStatus(req.user.id, req.user.workspaceId),
       tracking: {
         appUrl: env.appUrl,

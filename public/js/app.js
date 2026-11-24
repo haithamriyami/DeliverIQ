@@ -673,9 +673,9 @@ async function loadSettings() {
   const [me, team] = await Promise.all([api('/auth/me'), api('/auth/team')]);
   const sg = me.sendgrid;
   const google = me.google || {};
-  document.getElementById('sendgrid-status').innerHTML = sg.enabled
-    ? `<span class="sendgrid-pill live">SendGrid live · ${sg.fromEmail}</span>`
-    : `<span class="sendgrid-pill dry">SendGrid dry run · ${sg.fromEmail}</span>`;
+  document.getElementById('sendgrid-status').innerHTML = sg?.enabled
+    ? `<span class="sendgrid-pill live">SendGrid on · ${escapeHtml(sg.fromEmail || '')}</span>`
+    : '<span class="sendgrid-pill dry">SendGrid off</span>';
 
   const gmailEl = document.getElementById('gmail-status');
   const actions = document.getElementById('gmail-actions');
@@ -798,9 +798,17 @@ function fmtTime(value) {
 function sentTodayLabel(sender) {
   const here = sender.sentTodayHere ?? sender.sentToday;
   const shared = sender.sharedWithOtherWorkspaces
-    ? ` (${fmtNum(sender.sentToday)} in total from this Gmail, which another workspace also uses)`
+    ? ` (${fmtNum(sender.sentToday)} in total from this ${sender.provider === 'sendgrid' ? 'SendGrid account' : 'Gmail'}, which another workspace also uses)`
     : '';
   return `${fmtNum(here)} of ${fmtNum(sender.dailyCap)} sent in the last 24 hours${shared}`;
+}
+
+function providerLabel(sender) {
+  return sender?.provider === 'sendgrid' ? 'SendGrid' : 'Gmail';
+}
+
+function senderTitle(sender) {
+  return sender?.provider === 'sendgrid' ? `SendGrid · ${sender.email}` : sender.email;
 }
 
 async function loadSendingStatus() {
@@ -817,7 +825,7 @@ async function loadSendingStatus() {
   const rows = [];
   for (const sender of status.senders || []) {
     if (sender.gmailLimitReached && !sender.paused) {
-      rows.push(`<div class="banner-row"><div><strong>Gmail daily sending limit reached for ${escapeHtml(sender.email)}</strong>Sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time, by itself. Queued emails stay queued and nothing is counted as a bounce.</div></div>`);
+      rows.push(`<div class="banner-row"><div><strong>${providerLabel(sender)} daily sending limit reached for ${escapeHtml(sender.email)}</strong>Sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time, by itself. Queued emails stay queued and nothing is counted as a bounce.</div></div>`);
     }
     if (sender.paused) {
       rows.push(`<div class="banner-row"><div><strong>Sending paused for ${escapeHtml(sender.email)}</strong>${escapeHtml(sender.pausedReason || '')}</div>
@@ -846,8 +854,8 @@ async function loadSendingStatus() {
   }
   if (meter) {
     const parts = (status.senders || []).map((sender) => {
-      const base = `${escapeHtml(sender.email)}: ${sentTodayLabel(sender)}, ${fmtNum(sender.queued)} queued`;
-      if (sender.gmailLimitReached && sender.queued) return `${base}. Gmail daily sending limit reached, sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time`;
+      const base = `${escapeHtml(senderTitle(sender))}: ${sentTodayLabel(sender)}, ${fmtNum(sender.queued)} queued${sender.sharedQueue ? ' (shared with Gmail)' : ''}`;
+      if (sender.gmailLimitReached && sender.queued) return `${base}. ${providerLabel(sender)} daily sending limit reached, sending resumes at ${fmtTime(sender.gmailLimitUntil)} Nairobi time`;
       if (sender.capReached && sender.queued) return `${base}. Daily limit reached, the rest goes out after ${fmtTime(sender.resumesAt)} Nairobi time${sender.estimatedFinish ? `, all done about ${fmtTime(sender.estimatedFinish)}` : ''}`;
       if (sender.queued && sender.estimatedFinish && !sender.paused && !status.globalPause) {
         return `${base}. About ${fmtNum(sender.emailsPerHour)} per hour, estimated finish ${fmtTime(sender.estimatedFinish)} Nairobi time`;
@@ -861,7 +869,7 @@ async function loadSendingStatus() {
   if (accounts) {
     accounts.innerHTML = (status.senders || []).length
       ? status.senders
-          .map((sender) => `<div class="team-row"><span>${escapeHtml(sender.email)}</span><span class="muted">${sentTodayLabel(sender)} · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}${sender.gmailLimitReached && !sender.paused ? ` · Gmail daily limit, resumes ${fmtTime(sender.gmailLimitUntil)}` : ''}</span></div>`)
+          .map((sender) => `<div class="team-row"><span>${escapeHtml(senderTitle(sender))}</span><span class="muted">${sentTodayLabel(sender)} · ${fmtNum(sender.queued)} queued${sender.queued && sender.estimatedFinish && !sender.paused ? ` · done about ${fmtTime(sender.estimatedFinish)}` : ''}${sender.paused ? ' · paused' : ''}${sender.gmailLimitReached && !sender.paused ? ` · ${providerLabel(sender)} daily limit, resumes ${fmtTime(sender.gmailLimitUntil)}` : ''}</span></div>`)
           .join('')
       : '<p class="muted">No Gmail connected in this workspace yet.</p>';
   }
@@ -937,7 +945,51 @@ async function loadSendingSettings() {
   }
   const owner = currentUser?.role === 'owner';
   form.querySelectorAll('input, button').forEach((el) => { el.disabled = !owner; });
+  loadSendGridSettings(settings.sendgrid || {}, owner);
 }
+
+function loadSendGridSettings(sg, owner) {
+  const form = document.getElementById('sendgrid-settings-form');
+  if (!form) return;
+  form.enabled.checked = Boolean(sg.enabled);
+  form.fromEmail.value = sg.fromEmail || '';
+  form.fromName.value = sg.fromName || '';
+  form.replyToEmail.value = sg.replyToEmail || '';
+  form.dailyCap.value = sg.dailyCap || sg.defaultDailyCap || 100;
+  const keyEl = document.getElementById('sg-key-status');
+  if (keyEl) {
+    keyEl.innerHTML = sg.keyConfigured
+      ? `<span class="sendgrid-pill ${sg.enabled ? 'live' : 'dry'}">${sg.enabled ? 'SendGrid is on' : 'SendGrid is off'} · API key set on the server</span>`
+      : '<span class="sendgrid-pill dry">No SENDGRID_API_KEY on the server yet</span>';
+  }
+  const hook = document.getElementById('sg-webhook-url');
+  if (hook) hook.textContent = sg.webhookUrl || '';
+  form.querySelectorAll('input, button').forEach((el) => { el.disabled = !owner; });
+}
+
+document.getElementById('sendgrid-settings-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.target;
+  try {
+    await api('/sending/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        sendgrid: {
+          enabled: form.enabled.checked,
+          fromEmail: form.fromEmail.value.trim(),
+          fromName: form.fromName.value.trim(),
+          replyToEmail: form.replyToEmail.value.trim(),
+          dailyCap: Number(form.dailyCap.value),
+        },
+      }),
+    });
+    showToast(form.enabled.checked ? 'SendGrid is on and shares the sending with Gmail' : 'SendGrid settings saved, SendGrid is off');
+    await loadSendingSettings();
+    await loadSendingStatus();
+  } catch (err) {
+    showToast(err.message);
+  }
+});
 
 document.getElementById('sending-settings-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();

@@ -41,9 +41,15 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:3000/auth/google/callback
 
 If you later host for free (Render/Railway), add that URL as a second redirect URI, e.g. `https://your-app.onrender.com/auth/google/callback`. Still no custom domain.
 
-## SendGrid (optional)
+## SendGrid (optional second sender)
 
-Only needed if you later buy a domain and want higher volume. Until Gmail is connected or SendGrid is live, jobs are logged locally.
+SendGrid can send next to Gmail. It is off until a workspace owner switches it on in **Settings → SendGrid (second sender)**.
+
+- Server env: `SENDGRID_API_KEY` (Mail Send access, never stored in the database or shown in the app), optional `SENDGRID_FROM_EMAIL` and `SENDGRID_FROM_NAME` as defaults for the From address and name, and `SENDGRID_WEBHOOK_VERIFICATION_KEY` for the signed Event Webhook. `SENDGRID_DRY_RUN` is no longer used for sending.
+- The From address must be on a domain authenticated in SendGrid. Set a Reply-To you read (for example your Gmail), because the domain may not receive mail.
+- When on, Gmail and SendGrid work through the same queue at the same time, each with its own gap slot and rolling 24 hour cap (SendGrid default 100, the free plan limit). A short claim per contact makes sure two senders never email the same person. Each send row records its sender in `campaign_recipients.sender_account_id`; SendGrid uses one shared `gmail_accounts` row with email `sendgrid` for its gap, count and holds.
+- Follow ups thread only when they go out from the same Gmail as the earlier step. A follow up from SendGrid, or after a SendGrid email, goes out as a new email.
+- Event Webhook: in SendGrid, Settings → Mail Settings → Event Webhook, set the URL to `https://<your app>/webhooks/sendgrid` and select Bounced, Dropped, Spam Reports, Unsubscribe and Group Unsubscribe. Turn on Signed Event Webhook and put its verification key in `SENDGRID_WEBHOOK_VERIFICATION_KEY`. Without the key, an event is only accepted when it carries the SendGrid message id of a send DeliverIQ recorded.
 
 ## What is included
 

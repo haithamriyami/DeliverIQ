@@ -63,9 +63,11 @@ export const env = {
   redis: redisConfig(),
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? 'placeholder-sendgrid-api-key',
-    fromEmail: process.env.SENDGRID_FROM_EMAIL ?? 'hello@deliveriq.local',
+    // Default From address and name for the SendGrid sender. Settings can override them per workspace.
+    fromEmail: process.env.SENDGRID_FROM_EMAIL ?? '',
     fromName: process.env.SENDGRID_FROM_NAME ?? '',
     webhookVerificationKey: process.env.SENDGRID_WEBHOOK_VERIFICATION_KEY ?? '',
+    // Only shown in the app for old setups. SendGrid sending is switched on per workspace in Settings.
     dryRun: (process.env.SENDGRID_DRY_RUN ?? 'true') === 'true',
   },
   google: {

@@ -12,7 +12,8 @@ import crypto from 'crypto';
 import { prisma } from '../lib/prisma.js';
 import { env } from '../config/env.js';
 import { runSchedulerTick } from './campaignService.js';
-import { workspaceSendSettings, sentTodayCount, nextPendingForSender } from './sendScheduler.js';
+import { workspaceSendSettings, sentTodayCount, nextPendingForSender, activeSenders } from './sendScheduler.js';
+import { isSendGridAccount, sendGridSettings } from './sendgridService.js';
 import { normalizeSendSettings } from '../utils/throttle.js';
 
 export const LEASE_NAME = 'sender';
@@ -41,13 +42,14 @@ export async function releaseLease(holder) {
 
 /** Is there anything that could be sent right now or within this run? */
 export async function hasSendableWork() {
-  const senders = await prisma.gmailAccount.findMany({ where: { refreshToken: { not: null }, sendingPausedAt: null } });
+  const senders = await activeSenders();
   for (const sender of senders) {
     // Work in paused workspaces is skipped by nextPendingForSender.
     const work = await nextPendingForSender(sender);
     if (!work) continue;
     const settings = normalizeSendSettings(await workspaceSendSettings(work.campaign.workspaceId));
-    if ((await sentTodayCount(sender)) >= settings.dailySendCap) continue;
+    const cap = isSendGridAccount(sender) ? (await sendGridSettings(work.campaign.workspaceId)).dailyCap : settings.dailySendCap;
+    if ((await sentTodayCount(sender)) >= cap) continue;
     return true;
   }
   return false;
